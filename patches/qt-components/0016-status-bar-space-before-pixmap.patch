@@ -1,0 +1,17 @@
+StatusBar: keep its space while the pixmap is on its way
+
+A later upstream change (0db509ea) hid the status bar without a pixmap. Ours arrives by an
+async D-Bus call, so the first frames had no status bar and the page then jumped down 36 px.
+PR1.3's components hide it only for showStatusBar: false, and it paints black until then.
+
+--- a/src/meego/StatusBar.qml
++++ b/src/meego/StatusBar.qml
+@@ -50,7 +50,7 @@
+     property bool __completed: false
+ 
+     states: State {
+-        name: "hide"; when: showStatusBar==false || statusBar.hasPixmap==false
++        name: "hide"; when: showStatusBar==false
+         PropertyChanges { target: statusBar; anchors.topMargin: -statusBar.height; visible: false}
+     }
+ 

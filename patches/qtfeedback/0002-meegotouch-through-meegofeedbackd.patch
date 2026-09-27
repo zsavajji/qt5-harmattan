@@ -1,0 +1,136 @@
+meegotouch backend: theme effects through meegofeedbackd
+
+Qt 5 apps can't load libmeegotouch, so the backend speaks MFeedbackPlayer's protocol to
+meegofeedbackd itself (/tmp/mfeedbackd/player.sock: the protocol version and the app's name,
+then one effect name per playback), and maps QtFeedback's effects to the theme's names
+(Press/Release: priority2_static_*, the weak ones: priority2_pannable_*, drag: grab, drop,
+move, Appear/Disappear: popup, close). Qt Mobility's played priority2_static_press for all.
+
+--- a/src/plugins/feedback/meegotouch/qfeedback.cpp
++++ b/src/plugins/feedback/meegotouch/qfeedback.cpp
+@@ -38,48 +38,43 @@
+ ** $QT_END_LICENSE$
+ **
+ ****************************************************************************/
+-#include "qfeedback.h"
+-#include "qfeedbackeffect.h"
+-
+-#include <QtCore/QCoreApplication>
+-#include <QtCore/QtPlugin>
+ 
+-#include <meegotouch/MFeedback>
++// Harmattan (N9, N950): theme effects through meegofeedbackd, the daemon behind Qt 4's
++// MFeedback, without libmeegotouch. Its protocol (libmeegotouch's MFeedbackPlayer): a
++// QDataStream of QStrings on /tmp/mfeedbackd/player.sock, the protocol version and the app's
++// name on connecting, then one effect name per playback. The names are the theme's
++// (/usr/share/themes/base/meegotouch/feedbacks); without the daemon nothing plays.
+ 
+-// TODO Use a style property based enum to play the correct feedback
+-//enum MeegoTouchFeedback
+-//{
+-//    // MWidgetStyle
+-//    widgetPressFeedback,
+-//    widgetReleaseFeedback,
+-//    widgetCancelFeedback,
+-//    // MSliderStyle
+-//    sliderMoveFeedback,
+-//    // MTextEditStyle
+-//    textEditPressBoundaryFeedback,
+-//    textEditReleaseBoundaryFeedback,
+-//    textEditPressWordFeedback,
+-//    textEditReleaseWordFeedback,
+-//    textEditChangeSelectionFeedback
+-//};
++#include "qfeedback.h"
++#include <qfeedbackeffect.h>
++#include <QtCore/QCoreApplication>
++#include <QtCore/QDataStream>
+ 
+-static QString convertToMeegoTouch(QFeedbackEffect::ThemeEffect effect)
++static QString effectName(QFeedbackEffect::Effect effect)
+ {
+     switch (effect) {
+     case QFeedbackEffect::Press:
++    case QFeedbackEffect::PressStrong:
++        return QStringLiteral("priority2_static_press");
+     case QFeedbackEffect::Release:
++    case QFeedbackEffect::ReleaseStrong:
++        return QStringLiteral("priority2_static_release");
+     case QFeedbackEffect::PressWeak:
++        return QStringLiteral("priority2_pannable_press");
+     case QFeedbackEffect::ReleaseWeak:
+-    case QFeedbackEffect::PressStrong:
+-    case QFeedbackEffect::ReleaseStrong:
++        return QStringLiteral("priority2_pannable_release");
+     case QFeedbackEffect::DragStart:
++        return QStringLiteral("priority2_grab");
+     case QFeedbackEffect::DragDropInZone:
+     case QFeedbackEffect::DragDropOutOfZone:
++        return QStringLiteral("priority2_drop");
+     case QFeedbackEffect::DragCrossBoundary:
++    case QFeedbackEffect::Move:
++        return QStringLiteral("priority2_move");
+     case QFeedbackEffect::Appear:
++        return QStringLiteral("priority2_popup");
+     case QFeedbackEffect::Disappear:
+-    case QFeedbackEffect::Move:
+-        return MFeedback::Press;
++        return QStringLiteral("priority2_close");
+     default:
+         return QString();
+     }
+@@ -89,15 +84,25 @@
+     QObject(parent),
+     QFeedbackThemeInterface()
+ {
++    // A local connect completes at once, so the greeting goes out before the first effect.
++    connect(&m_socket, &QLocalSocket::connected, this, [this] {
++        QDataStream out(&m_socket);
++        out << QStringLiteral("FeedbackProtocolVersion#1") << QCoreApplication::applicationName();
++    });
+ }
+ 
+ bool QFeedbackMeegoTouch::play(QFeedbackEffect::Effect effect)
+ {
+-    const QString &feedbackString = convertToMeegoTouch(effect);
+-    if (feedbackString.isEmpty())
++    const QString name = effectName(effect);
++    if (name.isEmpty())
+         return false;
+-
+-    MFeedback::play(feedbackString);
++    if (m_socket.state() == QLocalSocket::UnconnectedState)
++        m_socket.connectToServer(QStringLiteral("/tmp/mfeedbackd/player.sock"));
++    if (m_socket.state() != QLocalSocket::ConnectedState)
++        return false;
++    QDataStream out(&m_socket);
++    out << name;
++    m_socket.flush();
+     return true;
+ }
+ 
+@@ -105,4 +110,3 @@
+ {
+     return QFeedbackInterface::PluginLowPriority;
+ }
+-
+--- a/src/plugins/feedback/meegotouch/qfeedback.h
++++ b/src/plugins/feedback/meegotouch/qfeedback.h
+@@ -42,6 +42,7 @@
+ #define QFEEDBACK_MEEGOTOUCH_H
+ 
+ #include <QObject>
++#include <QtNetwork/QLocalSocket>
+ #include <qfeedbackplugininterfaces.h>
+ 
+ QT_BEGIN_HEADER
+@@ -55,6 +56,9 @@
+ 
+     virtual bool play(QFeedbackEffect::Effect);
+     virtual QFeedbackInterface::PluginPriority pluginPriority();
++
++private:
++    QLocalSocket m_socket;
+ };
+ 
+ QT_END_HEADER

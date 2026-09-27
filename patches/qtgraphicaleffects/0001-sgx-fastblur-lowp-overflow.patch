@@ -1,0 +1,23 @@
+SGX530: FastBlur's 4-tap average without lowp overflow
+
+texture2D() on a lowp sampler returns lowp, and the N9's SGX530 keeps lowp in [-2, 2]: the
+sum of four taps clamped at 2 before the * 0.25, so opaque pixels came out with alpha 0.5
+(and green and blue capped at 0.5 too). FastBlur, FastGlow, FastInnerShadow and
+FastMaskedBlur blurred too light, see-through. Each tap is scaled before the sum.
+
+--- a/src/effects/shaders/fastblur_internal.frag
++++ b/src/effects/shaders/fastblur_internal.frag
+@@ -6,9 +6,9 @@
+ varying highp vec2 qt_TexCoord3;
+ 
+ void main() {
+-    highp vec4 sourceColor = (texture2D(source, qt_TexCoord0) +
+-    texture2D(source, qt_TexCoord1) +
+-    texture2D(source, qt_TexCoord2) +
+-    texture2D(source, qt_TexCoord3)) * 0.25;
++    highp vec4 sourceColor = texture2D(source, qt_TexCoord0) * 0.25 +
++    texture2D(source, qt_TexCoord1) * 0.25 +
++    texture2D(source, qt_TexCoord2) * 0.25 +
++    texture2D(source, qt_TexCoord3) * 0.25;
+     gl_FragColor = sourceColor * qt_Opacity;
+ }

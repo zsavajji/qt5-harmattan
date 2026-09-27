@@ -1,0 +1,104 @@
+InverseMouseArea: Qt Quick 2 mouse events
+
+It filtered QGraphicsScene events, which a QQuickWindow never sends, so a tap outside a focused
+field neither unfocused it nor closed the keyboard. Now it reads the window's mouse events.
+Presses on the keyboard never reach the window (another X window), so no check is needed.
+
+diff --git a/src/meego/minversemousearea.h b/src/meego/minversemousearea.h
+--- a/src/meego/minversemousearea.h	2026-09-26 17:31:39
++++ b/src/meego/minversemousearea.h	2026-09-26 17:31:39
+@@ -43,8 +43,6 @@
+ 
+ #include <QDeclarativeItem>
+ 
+-class QGraphicsSceneMouseEvent;
+-
+ class MInverseMouseArea : public QDeclarativeItem
+ {
+     Q_OBJECT
+@@ -62,7 +60,6 @@
+     void itemChange(ItemChange change, const ItemChangeData &data);
+ 
+ private:
+-    bool isClickedOnSoftwareInputPanel(QGraphicsSceneMouseEvent *event) const;
+     QPointF mapToRootItem(QPointF pos);
+ 
+ signals:
+@@ -72,6 +69,7 @@
+ 
+ private:
+     bool m_pressed;
++    QPointF m_pressPos;
+     bool m_enabled;
+ 
+     Q_DISABLE_COPY(MInverseMouseArea)
+diff --git a/src/meego/minversemousearea.cpp b/src/meego/minversemousearea.cpp
+--- a/src/meego/minversemousearea.cpp	2026-09-26 17:31:39
++++ b/src/meego/minversemousearea.cpp	2026-09-26 17:31:39
+@@ -40,8 +40,7 @@
+ 
+ #include "minversemousearea.h"
+ 
+-#include <QGraphicsScene>
+-#include <QGraphicsSceneMouseEvent>
++#include <QMouseEvent>
+ 
+ 
+ // Threshold in QDeclarativeFlickable is 20
+@@ -106,43 +105,39 @@
+     QQuickItem::itemChange(change, data);
+ }
+ 
+-bool MInverseMouseArea::isClickedOnSoftwareInputPanel(QGraphicsSceneMouseEvent *event) const
+-{
+-    Q_UNUSED(event);
+-    // FIXME: How do we solve this with Qt5?
+-    return false;
+-}
+-
+ bool MInverseMouseArea::eventFilter(QObject *obj, QEvent *ev)
+ {
+     Q_UNUSED(obj);
+ 
+     if (!m_enabled || !isVisible())
+         return false;    
++    // Qt 5: the window's own mouse events, in window (scene) coordinates. Presses on the
++    // keyboard never come here, it is another X window.
+     switch (ev->type()) {
+-    case QEvent::GraphicsSceneMousePress: {
+-        QGraphicsSceneMouseEvent *me = static_cast<QGraphicsSceneMouseEvent *>(ev);
+-        QPointF mappedPos = mapToRootItem(me->scenePos());
++    case QEvent::MouseButtonPress: {
++        QMouseEvent *me = static_cast<QMouseEvent *>(ev);
++        QPointF mappedPos = mapToRootItem(me->windowPos());
+ 
+-        m_pressed = !isUnderMouse() && !isClickedOnSoftwareInputPanel(me);
++        m_pressPos = me->windowPos();
++        m_pressed = !contains(mapFromScene(me->windowPos()));
+ 
+         if (m_pressed)
+             emit pressedOutside(mappedPos.x(), mappedPos.y());
+         break;
+     }
+-    case QEvent::GraphicsSceneMouseMove: {
++    case QEvent::MouseMove: {
+         if (m_pressed) {
+-            QGraphicsSceneMouseEvent *me = static_cast<QGraphicsSceneMouseEvent *>(ev);
+-            const QPointF &dist = me->scenePos() - me->buttonDownScenePos(Qt::LeftButton);
++            QMouseEvent *me = static_cast<QMouseEvent *>(ev);
++            const QPointF dist = me->windowPos() - m_pressPos;
+ 
+             if (dist.x() * dist.x() + dist.y() * dist.y() > FlickThresholdSquare)
+                 m_pressed = false;
+         }
+         break;
+     }
+-    case QEvent::GraphicsSceneMouseRelease: {
+-        QGraphicsSceneMouseEvent *me = static_cast<QGraphicsSceneMouseEvent *>(ev);
+-        QPointF mappedPos = mapToRootItem(me->scenePos());
++    case QEvent::MouseButtonRelease: {
++        QMouseEvent *me = static_cast<QMouseEvent *>(ev);
++        QPointF mappedPos = mapToRootItem(me->windowPos());
+ 
+         if (m_pressed) {
+             m_pressed = false;

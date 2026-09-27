@@ -1,0 +1,8 @@
+<aegis>
+  <request>
+    <!-- /dev/video* and /dev/v4l-subdev* (root:video), like the stock camera-ui -->
+    <credential name="GRP::video" />
+    <for path="/opt/qt5-cameratest/bin/qt5-cameratest" />
+    <for path="/opt/qt5-cameratest/dev/bin/qt5-cameratest-dev" />
+  </request>
+</aegis>

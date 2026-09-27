@@ -1,0 +1,76 @@
+camerabin: the N9's front camera is mirrored
+
+Nokia's subdevsrc2 gives the front camera's images with left and right swapped. The
+renderer's surface format says so (QVideoSurfaceFormat::setMirrored(), which VideoOutput
+undoes), and photos get the EXIF orientation "flip-rotate-0" unless the app set one.
+
+--- a/src/gsttools/qgstreamervideorenderer.cpp
++++ b/src/gsttools/qgstreamervideorenderer.cpp
+@@ -200,7 +200,10 @@
+                 gst_caps_unref(caps);
+             }
+             gst_object_unref(GST_OBJECT(pad));
+-            m_surface->start(QVideoSurfaceFormat(size, QVideoFrame::Format_RGB32, HarmattanTextureHandle));
++            QVideoSurfaceFormat format(size, QVideoFrame::Format_RGB32, HarmattanTextureHandle);
++            // The N9's front camera sends mirrored frames (CameraBinSession sets this).
++            format.setMirrored(property("_q_mirrored").toBool());
++            m_surface->start(format);
+         }
+         if (m_surface->isActive()) {
+             m_surface->present(QVideoFrame(new QHarmattanTextureBuffer(m_videoSink, frame),
+--- a/src/plugins/gstreamer/camerabin/camerabinsession.cpp
++++ b/src/plugins/gstreamer/camerabin/camerabinsession.cpp
+@@ -676,6 +676,17 @@
+     return m_cameraSrc;
+ }
+ 
++#if !GST_CHECK_VERSION(1,0,0)
++// Nokia's subdevsrc2 (the N9) gives the front camera's images mirrored, left and right
++// swapped. The viewfinder is told (the renderer's surface format), photos are tagged
++// (captureImage()).
++bool CameraBinSession::isMirrored() const
++{
++    return m_videoSrc && m_inputDevice == QLatin1String("secondary")
++            && qstrcmp(qt_gst_element_get_factory_name(m_videoSrc), "subdevsrc2") == 0;
++}
++#endif
++
+ void CameraBinSession::captureImage(int requestId, const QString &fileName)
+ {
+     const QString actualFileName = m_mediaStorageLocation.generateFileName(fileName,
+@@ -691,6 +702,14 @@
+ 
+     g_object_set(G_OBJECT(m_camerabin), FILENAME_PROPERTY, actualFileName.toLocal8Bit().constData(), NULL);
+ 
++#if !GST_CHECK_VERSION(1,0,0)
++    // The N9's front camera: its images are mirrored (see isMirrored()), which the photo's EXIF
++    // orientation says unless the app set one.
++    if (isMirrored() && !m_metaData.contains(GST_TAG_IMAGE_ORIENTATION))
++        gst_tag_setter_add_tags(GST_TAG_SETTER(m_camerabin), GST_TAG_MERGE_REPLACE,
++                                GST_TAG_IMAGE_ORIENTATION, "flip-rotate-0", NULL);
++#endif
++
+     g_signal_emit_by_name(G_OBJECT(m_camerabin), CAPTURE_START, NULL);
+ 
+     m_imageFileName = actualFileName;
+@@ -959,6 +978,8 @@
+ #endif
+ 
+ #if !GST_CHECK_VERSION(1,0,0)
++    if (m_viewfinder)
++        m_viewfinder->setProperty("_q_mirrored", isMirrored());
+     // In NULL, before READY: see setCaptureCaps().
+     m_reloadBeforeStart = false;
+     setAudioCaptureCaps();
+--- a/src/plugins/gstreamer/camerabin/camerabinsession.h
++++ b/src/plugins/gstreamer/camerabin/camerabinsession.h
+@@ -200,6 +200,9 @@
+     void setStatus(QCamera::Status status);
+     void setCaptureCaps(const char *property, GstCaps *caps);
+     void setNullState();
++#if !GST_CHECK_VERSION(1,0,0)
++    bool isMirrored() const;
++#endif
+     void setStateHelper(QCamera::State state);
+     void setError(int error, const QString &errorString);
+ 

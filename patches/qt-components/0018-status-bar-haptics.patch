@@ -1,0 +1,96 @@
+Status bar: press and release feedback through meegofeedbackd
+
+The Qt 4 status bar played the theme's press and release effects (priority2_static_press,
+priority2_static_release, at least 150 ms apart: mstatusbarstyle.css). The port talks to
+meegofeedbackd's socket directly, as libmeegotouch's MFeedbackPlayer does.
+
+--- a/src/meego/mdeclarativestatusbar.h
++++ b/src/meego/mdeclarativestatusbar.h
+@@ -46,6 +46,7 @@
+ #define MDECLARATIVESTATUSBAR_H
+ 
+ #include <QtCore/QAbstractNativeEventFilter>
++#include <QtCore/QElapsedTimer>
+ #include <QtGui/QImage>
+ #include <QtQuick/QQuickPaintedItem>
+ 
+@@ -53,7 +54,8 @@
+ 
+ // Draws the shared X pixmap that the system status bar (com.meego.core.MStatusBar) renders
+ // into: landscape in rows 0-35, portrait in rows 36-71. Repaints when XDamage reports a
+-// change, while the app is active and the bar visible; a tap opens the status menu. Qt 4
++// change, while the app is active and the bar visible; a tap opens the status menu (with the
++// stock press and release feedback). Qt 4
+ // used QPixmap::fromX11Pixmap, which Qt 5 lacks, so this reads the pixmap through xcb.
+ class MDeclarativeStatusBar : public QQuickPaintedItem, public QAbstractNativeEventFilter
+ {
+@@ -95,6 +97,7 @@
+     QImage m_image;
+     bool m_pressed = false;
+     bool m_feedback = false;
++    QElapsedTimer m_pressTime;
+ };
+ 
+ #endif
+--- a/src/meego/mdeclarativestatusbar.cpp
++++ b/src/meego/mdeclarativestatusbar.cpp
+@@ -52,8 +52,10 @@
+ #include <QDBusPendingCallWatcher>
+ #include <QDBusPendingReply>
+ #include <QDBusServiceWatcher>
++#include <QDataStream>
+ #include <QDebug>
+ #include <QGuiApplication>
++#include <QLocalSocket>
+ #include <QMouseEvent>
+ #include <QPainter>
+ #include <QTimer>
+@@ -68,6 +70,29 @@
+ static const char menuService[] = "com.meego.core.MStatusIndicatorMenu";
+ static const char menuPath[] = "/statusindicatormenu";
+ 
++// Haptics and sound through meegofeedbackd, as the Qt 4 status bar did (libmeegotouch's
++// MFeedbackPlayer protocol): a QDataStream of QStrings, the protocol version and the app's name
++// on connecting, then one effect name per playback. A local connect completes at once, so the
++// greeting goes out before the first effect; without the daemon nothing plays.
++static void playFeedback(const QString &effect)
++{
++    static QLocalSocket *socket = nullptr;
++    if (!socket) {
++        socket = new QLocalSocket(qApp);
++        QObject::connect(socket, &QLocalSocket::connected, [] {
++            QDataStream out(socket);
++            out << QStringLiteral("FeedbackProtocolVersion#1") << QCoreApplication::applicationName();
++        });
++    }
++    if (socket->state() == QLocalSocket::UnconnectedState)
++        socket->connectToServer(QStringLiteral("/tmp/mfeedbackd/player.sock"));
++    if (socket->state() == QLocalSocket::ConnectedState) {
++        QDataStream out(socket);
++        out << effect;
++        socket->flush();
++    }
++}
++
+ static xcb_connection_t *xcbConnection()
+ {
+     return static_cast<xcb_connection_t *>(
+@@ -240,6 +265,8 @@
+ void MDeclarativeStatusBar::mousePressEvent(QMouseEvent *event)
+ {
+     m_pressed = true;
++    m_pressTime.start();
++    playFeedback(QStringLiteral("priority2_static_press"));
+     // The top edge also starts the compositor's swipe, so press and release can come right
+     // after each other: keep the feedback up long enough to be seen (as in Qt 4).
+     m_feedback = true;
+@@ -257,6 +284,9 @@
+         return;
+     m_pressed = false;
+     update();
++    // The theme's minimum-tap-feedback-duration: the release effect at least 150 ms after the press.
++    QTimer::singleShot(qMax<qint64>(0, 150 - m_pressTime.elapsed()), this,
++                       [] { playFeedback(QStringLiteral("priority2_static_release")); });
+     if (QRectF(0, 0, width(), height()).adjusted(-30, -30, 30, 30).contains(event->localPos())) {
+         const QDBusMessage message = QDBusMessage::createMethodCall(QLatin1String(menuService),
+                                                                     QLatin1String(menuPath),

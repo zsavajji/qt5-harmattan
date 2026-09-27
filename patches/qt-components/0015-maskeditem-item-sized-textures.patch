@@ -1,0 +1,62 @@
+MaskedItem: textures cover the item's own rectangle
+
+The ProgressBar's mask (value * width wide) was stretched over the whole bar, so it always
+looked full. The SGX reads one of two same-size source textures as empty: the mask's is
+1 px wider and the shader scales into it.
+
+--- a/src/meego/MaskedItem.qml
++++ b/src/meego/MaskedItem.qml
+@@ -40,31 +40,47 @@
+ 
+ import QtQuick 2.0
+ 
++// Qt 5: both textures cover this item's own rectangle, as the Qt 4 version clipped to it. A
++// source texture is its item's size stretched over the effect, so a ProgressBar mask 60% wide
++// covered the whole bar. (sourceRect instead left the textures unrendered on the SGX.)
+ ShaderEffect {
++    id: effect
++
+     property variant targetItem: ShaderEffectSource {
+         sourceItem: Item {
+             id: childContainer
+-            width: childrenRect.width
+-            height: childrenRect.height
++            width: effect.width
++            height: effect.height
+         }
+     }
+ 
++    // SGX: of two source textures with the same size, one reads as empty. So the mask's is
++    // 1 px wider, and maskScale maps the effect onto its first effect.width pixels.
+     property variant maskItem: ShaderEffectSource {
+-        id: maskItem
++        sourceItem: Item {
++            id: maskContainer
++            width: effect.width + 1
++            height: effect.height
++        }
+     }
++    property real maskScale: effect.width / (effect.width + 1)
+ 
+-    property alias mask: maskItem.sourceItem
++    // The mask item goes into its container (a value set at creation doesn't call onMaskChanged).
++    property Item mask
++    onMaskChanged: if (mask) mask.parent = maskContainer
++    Component.onCompleted: if (mask) mask.parent = maskContainer
+ 
+     default property alias __children: childContainer.children
+ 
+     fragmentShader: "
+         uniform lowp float qt_Opacity;
++        uniform highp float maskScale;
+         varying highp vec2 qt_TexCoord0;
+         uniform sampler2D targetItem;
+         uniform sampler2D maskItem;
+         void main() {
+-            gl_FragColor = texture2D(targetItem, qt_TexCoord0) * texture2D(maskItem, qt_TexCoord0).a * qt_Opacity;
++            gl_FragColor = texture2D(targetItem, qt_TexCoord0)
++                * texture2D(maskItem, vec2(qt_TexCoord0.x * maskScale, qt_TexCoord0.y)).a * qt_Opacity;
+         }
+     "
+ }
+-

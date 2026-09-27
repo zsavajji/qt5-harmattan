@@ -1,0 +1,108 @@
+Derived components assign platformStyle instead of redeclaring it
+
+ToolButton, TabButton, SheetButton (Button), RadioButton (CheckBox), CommonDialog,
+QueryDialog, SelectionDialog, MultiSelectionDialog (Dialog) and ContextMenu (AbstractMenu)
+redeclared their base's platformStyle. Qt 4 let the base's own bindings see the new
+property; Qt 5 resolves the name in the base component to the base's property, so a
+ToolButton drew the plain button background (not the toolbar one) and a RadioButton was laid
+out with CheckBoxStyle. Assigning the inherited property works the same in both.
+
+--- a/src/meego/CommonDialog.qml
++++ b/src/meego/CommonDialog.qml
+@@ -46,7 +46,7 @@
+ 
+     property string titleText: ""
+ 
+-    property Style platformStyle: SelectionDialogStyle {}
++    platformStyle: SelectionDialogStyle {}
+ 
+     //Deprecated, TODO Remove this on w13
+     property alias style: genericDialog.platformStyle
+--- a/src/meego/ContextMenu.qml
++++ b/src/meego/ContextMenu.qml
+@@ -51,7 +51,7 @@
+     property url icon
+ 
+     // platformStyle API
+-    property Style platformStyle: ContextMenuStyle{}
++    platformStyle: ContextMenuStyle{}
+     property Style style:         ContextMenuStyle{}
+ 
+     onPlatformTitleTextChanged: logDeprecatedMsg("platformTitleText")
+--- a/src/meego/MultiSelectionDialog.qml
++++ b/src/meego/MultiSelectionDialog.qml
+@@ -117,7 +117,7 @@
+         }
+ 
+     // Style API
+-    property Style platformStyle: SelectionDialogStyle {}
++    platformStyle: SelectionDialogStyle {}
+ 
+     //Deprecated, TODO Remove this on w13
+     property alias style: root.platformStyle
+--- a/src/meego/QueryDialog.qml
++++ b/src/meego/QueryDialog.qml
+@@ -67,7 +67,7 @@
+     //ToDo
+     property alias icon: iconImage.source
+ 
+-    property Style platformStyle: QueryDialogStyle {}
++    platformStyle: QueryDialogStyle {}
+ 
+     //__centerContentField: true
+ 
+--- a/src/meego/RadioButton.qml
++++ b/src/meego/RadioButton.qml
+@@ -43,7 +43,7 @@
+ CheckBox {
+     id: radioButton
+ 
+-    property Style platformStyle: RadioButtonStyle{}
++    platformStyle: RadioButtonStyle{}
+     property alias style: radioButton.platformStyle
+ 
+     __imageSource: !radioButton.enabled ? platformStyle.backgroundDisabled :
+--- a/src/meego/SelectionDialog.qml
++++ b/src/meego/SelectionDialog.qml
+@@ -128,7 +128,7 @@
+     }
+ 
+     // Style API
+-    property Style platformStyle: SelectionDialogStyle {}
++    platformStyle: SelectionDialogStyle {}
+ 
+     //Deprecated, TODO Remove this on w13
+     property alias style: root.platformStyle
+--- a/src/meego/SheetButton.qml
++++ b/src/meego/SheetButton.qml
+@@ -46,7 +46,7 @@
+ Button {
+     id: root
+ 
+-    property Style platformStyle: SheetButtonStyle {}
++    platformStyle: SheetButtonStyle {}
+ 
+     //Deprecated, TODO Remove this on w13
+     property alias style: root.platformStyle
+--- a/src/meego/TabButton.qml
++++ b/src/meego/TabButton.qml
+@@ -46,7 +46,7 @@
+ 
+     // Common public API
+     property Item tab
+-    property QtObject platformStyle: TabButtonStyle {}
++    platformStyle: TabButtonStyle {}
+     
+     //Deprecated: TODO, remove this! 
+     property alias style: tabButton.platformStyle
+--- a/src/meego/ToolButton.qml
++++ b/src/meego/ToolButton.qml
+@@ -49,7 +49,7 @@
+     //Removes button background if set to true
+     property bool flat: false
+ 
+-    property QtObject platformStyle: ToolButtonStyle { backgroundVisible: !toolButton.flat}
++    platformStyle: ToolButtonStyle { backgroundVisible: !toolButton.flat}
+ 
+     //Deprecated item, REMOVE THIS
+     property QtObject style: toolButton.platformStyle

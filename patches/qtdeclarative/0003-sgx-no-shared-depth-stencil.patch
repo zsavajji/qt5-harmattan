@@ -1,0 +1,26 @@
+SGX530: no shared depth/stencil buffers between layers
+
+QSGDefaultRenderContext shares one depth/stencil renderbuffer between all FBOs of the same
+size. On the N9's SGX530 a renderbuffer attached to several framebuffers breaks them: of two
+same-size ShaderEffectSources one drew nothing or garbage (MaskedItem, GaussianBlur without
+a transparent border). Each FBO gets its own, 3 bytes per pixel.
+
+--- a/src/quick/scenegraph/qsgdefaultrendercontext.cpp
++++ b/src/quick/scenegraph/qsgdefaultrendercontext.cpp
+@@ -275,12 +275,10 @@
+     format.size = fbo->size();
+     format.samples = fbo->format().samples();
+     format.attachments = QSGDepthStencilBuffer::DepthAttachment | QSGDepthStencilBuffer::StencilAttachment;
+-    QSharedPointer<QSGDepthStencilBuffer> buffer = manager->bufferForFormat(format);
+-    if (buffer.isNull()) {
+-        buffer = QSharedPointer<QSGDepthStencilBuffer>(new QSGDefaultDepthStencilBuffer(m_gl, format));
+-        manager->insertBuffer(buffer);
+-    }
+-    return buffer;
++    // Harmattan (SGX530): a depth/stencil renderbuffer attached to several framebuffers breaks
++    // them (two same-size layers: one drew nothing or garbage), so each FBO gets its own.
++    Q_UNUSED(manager);
++    return QSharedPointer<QSGDepthStencilBuffer>(new QSGDefaultDepthStencilBuffer(m_gl, format));
+ }
+ 
+ /*!

@@ -1,0 +1,15 @@
+diff --git a/src/meego/themedaemon/mlocalthemedaemonclient.cpp b/src/meego/themedaemon/mlocalthemedaemonclient.cpp
+index 73acd58f..7b504bf4 100644
+--- a/src/meego/themedaemon/mlocalthemedaemonclient.cpp
++++ b/src/meego/themedaemon/mlocalthemedaemonclient.cpp
+@@ -132,6 +132,10 @@ MLocalThemeDaemonClient::MLocalThemeDaemonClient(const QString &testPath, QObjec
+         if (themeRoots.at(i).endsWith(QDir::separator()))
+             themeRoots[i].truncate(themeRoots.at(i).length() - 1);
+ 
++        // qt5-harmattan: the N9's themes keep the component graphics under images/ (for
++        // example images/theme/basement/meegotouch-button/meegotouch-button-background.png),
++        // not only under icons/.
++        buildHash(themeRoots.at(i) + QDir::separator() + "images", QStringList() << "*.svg" << "*.png" << "*.jpg");
+         buildHash(themeRoots.at(i) + QDir::separator() + "icons", QStringList() << "*.svg" << "*.png" << "*.jpg");
+     }
+ 

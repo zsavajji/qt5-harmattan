@@ -1,0 +1,201 @@
+diff --git a/qmaliitplatforminputcontext.cpp b/qmaliitplatforminputcontext.cpp
+index a5a1b68..9e67697 100644
+--- a/qmaliitplatforminputcontext.cpp
++++ b/qmaliitplatforminputcontext.cpp
+@@ -22,7 +22,9 @@
+ #include "qmserverdbusaddress.h"
+ #include "qmserverproxy.h"
+ 
++#include <QClipboard>
+ #include <QGuiApplication>
++#include <QMimeData>
+ #include <QScreen>
+ #include <QKeyEvent>
+ #include <QTextFormat>
+@@ -45,9 +47,11 @@ namespace
+         static int portraitRotated = qGuiApp->primaryScreen()->primaryOrientation() == Qt::PortraitOrientation;
+ 
+         switch (orientation) {
+-        case Qt::PrimaryOrientation: // Urgh.
+         case Qt::PortraitOrientation:
+             return portraitRotated = QMaliitPlatformInputContext::Angle270;
++        // Harmattan: Primary is the display's native orientation, landscape on the N9. The xcb
++        // plugin gives such windows _MEEGOTOUCH_ORIENTATION_ANGLE 0, so the keyboard must agree.
++        case Qt::PrimaryOrientation:
+         case Qt::LandscapeOrientation:
+             return portraitRotated = QMaliitPlatformInputContext::Angle0;
+         case Qt::InvertedPortraitOrientation:
+@@ -73,7 +77,7 @@ static QString maliitServerAddress()
+ 
+     // Fallback to old socket when org.maliit.server service is not available
+     if (address.isEmpty())
+-        return QStringLiteral("unix:path=/tmp/meego-im-uiserver/d->server_dbus");
++        return QStringLiteral("unix:path=/tmp/meego-im-uiserver/imserver_dbus"); // Maliit 0.80's address
+ 
+     return address;
+ }
+@@ -109,6 +113,7 @@ public:
+     }
+ 
+     void sendStateUpdate(bool focusChanged = false);
++    void sendCopyPasteState();
+ 
+     QDBusConnection connection;
+     ComMeegoInputmethodUiserver1Interface *server;
+@@ -123,6 +128,9 @@ public:
+     QString preedit;
+     QPointer<QWindow> window;
+     QMap<QString, QVariant> imState;
++    // Harmattan: the 0.81 keyboard offers copy and paste only when told they are possible.
++    bool copyAvailable = false;
++    bool pasteAvailable = false;
+ 
+     QMaliitPlatformInputContext *q;
+ };
+@@ -134,6 +142,16 @@ QMaliitPlatformInputContext::QMaliitPlatformInputContext()
+ {
+     if (debug)
+         qDebug() << "QMaliitPlatformInputContext::QMaliitPlatformInputContext()";
++
++    // Asked only when the clipboard changes: with another app owning it, every question is
++    // an X round trip to that app, too slow for every keystroke.
++    auto updatePaste = [this] {
++        const QMimeData *data = QGuiApplication::clipboard()->mimeData();
++        d->pasteAvailable = data && data->hasText();
++        d->sendCopyPasteState();
++    };
++    connect(QGuiApplication::clipboard(), &QClipboard::dataChanged, this, updatePaste);
++    updatePaste();
+ }
+ 
+ 
+@@ -217,8 +235,11 @@ void QMaliitPlatformInputContext::update(Qt::InputMethodQueries queries)
+             d->imState["cursorRectangle"] = QRect(window->mapToGlobal(rect.topLeft()), rect.size());
+     }
+ 
+-    if (queries & Qt::ImCurrentSelection)
++    if (queries & Qt::ImCurrentSelection) {
+         d->imState["hasSelection"] = !query.value(Qt::ImCurrentSelection).toString().isEmpty();
++        d->copyAvailable = d->imState["hasSelection"].toBool();
++        d->sendCopyPasteState();
++    }
+ 
+     if (queries & Qt::ImHints) {
+         Qt::InputMethodHints hints = Qt::InputMethodHints(query.value(Qt::ImHints).toUInt());
+@@ -256,7 +277,9 @@ void QMaliitPlatformInputContext::setFocusObject(QObject *focused)
+                     this, SLOT(updateServerOrientation(Qt::ScreenOrientation)));
+     }
+ 
+-    d->imState["focusState"] = (focused != 0);
++    // Whether a text input has focus, not just any object: with focused != 0 the keyboard
++    // stayed open after focus moved to a plain item (Maliit 0.99 does the same).
++    d->imState["focusState"] = inputMethodAccepted();
+     if (inputMethodAccepted()) {
+         if (window)
+             d->imState["winId"] = static_cast<qulonglong>(window->winId());
+@@ -268,10 +291,22 @@ void QMaliitPlatformInputContext::setFocusObject(QObject *focused)
+             if (window)
+                 d->server->appOrientationChanged(orientationAngle(window->contentOrientation()));
+         }
++        // Harmattan: send the new field's text, cursor and hints with the focus change. With
++        // the previous field's state the keyboard first guessed "start of text" and flashed
++        // uppercase when a field was entered in the middle of a word.
++        update(Qt::ImQueryAll); // queries and sends the state (focusChanged)
++    } else {
++        d->sendStateUpdate(/*focusChanged*/true);
++    }
++    // Harmattan: Qt Quick asks to show the panel (on focus-in, and on a press when already
++    // focused) but never to hide it. So hide it here when focus leaves text input, and show
++    // it when focus reaches text input after a request that came first ("pending").
++    if (inputMethodAccepted()) {
++        if (window && d->inputPanelState != InputPanelHidden)
++            showInputPanel();
++    } else if (d->inputPanelState == InputPanelShown) {
++        hideInputPanel();
+     }
+-    d->sendStateUpdate(/*focusChanged*/true);
+-    if (inputMethodAccepted() && window && d->inputPanelState == InputPanelShown)
+-        showInputPanel();
+ 
+ }
+ 
+@@ -595,3 +630,9 @@ void QMaliitPlatformInputContextPrivate::sendStateUpdate(bool focusChanged)
+     server->updateWidgetInformation(imState, focusChanged);
+ }
+ 
++void QMaliitPlatformInputContextPrivate::sendCopyPasteState()
++{
++    if (valid)
++        server->setCopyPasteState(copyAvailable, pasteAvailable);
++}
++
+diff --git a/qmcontextadaptor.cpp b/qmcontextadaptor.cpp
+index 831f137..49e7ebb 100644
+--- a/qmcontextadaptor.cpp
++++ b/qmcontextadaptor.cpp
+@@ -19,6 +19,9 @@
+ #include <QtCore/QString>
+ #include <QtCore/QStringList>
+ #include <QtCore/QVariant>
++#include <QtGui/QGuiApplication>
++#include <QtGui/QKeyEvent>
++#include <QtGui/QKeySequence>
+ 
+ /*
+  * Implementation of adaptor class QMaliitInputcontext1Adaptor
+@@ -36,6 +39,33 @@ QMaliitInputcontext1Adaptor::~QMaliitInputcontext1Adaptor()
+     // destructor
+ }
+ 
++// Harmattan: the 0.81 server (the N9's meego-im-uiserver) calls copy and paste from the
++// keyboard's buttons; Maliit 0.99 dropped them. Send the platform shortcut to the focus object.
++static void sendShortcut(QKeySequence::StandardKey key)
++{
++    QObject *target = QGuiApplication::focusObject();
++    const QList<QKeySequence> bindings = QKeySequence::keyBindings(key);
++    if (!target || bindings.isEmpty())
++        return;
++    const int combined = bindings.first()[0];
++    const Qt::Key k = Qt::Key(combined & ~Qt::KeyboardModifierMask);
++    const Qt::KeyboardModifiers modifiers = Qt::KeyboardModifiers(combined & Qt::KeyboardModifierMask);
++    QKeyEvent press(QEvent::KeyPress, k, modifiers);
++    QKeyEvent release(QEvent::KeyRelease, k, modifiers);
++    QCoreApplication::sendEvent(target, &press);
++    QCoreApplication::sendEvent(target, &release);
++}
++
++void QMaliitInputcontext1Adaptor::copy()
++{
++    sendShortcut(QKeySequence::Copy);
++}
++
++void QMaliitInputcontext1Adaptor::paste()
++{
++    sendShortcut(QKeySequence::Paste);
++}
++
+ void QMaliitInputcontext1Adaptor::activationLostEvent()
+ {
+     // handle method call com.meego.inputmethod.inputcontext1.activationLostEvent
+diff --git a/qmcontextadaptor.h b/qmcontextadaptor.h
+index 7889183..14101bd 100644
+--- a/qmcontextadaptor.h
++++ b/qmcontextadaptor.h
+@@ -35,6 +35,8 @@ class QMaliitInputcontext1Adaptor: public QDBusAbstractAdaptor
+     Q_CLASSINFO("D-Bus Introspection", ""
+ "  <interface name=\"com.meego.inputmethod.inputcontext1\">\n"
+ "    <method name=\"activationLostEvent\"/>\n"
++"    <method name=\"copy\"/>\n"
++"    <method name=\"paste\"/>\n"
+ "    <method name=\"imInitiatedHide\"/>\n"
+ "    <method name=\"commitString\">\n"
+ "      <arg type=\"s\"/>\n"
+@@ -109,6 +111,8 @@ public:
+ public: // PROPERTIES
+ public Q_SLOTS: // METHODS
+     void activationLostEvent();
++    void copy();
++    void paste();
+     void commitString(const QString &in0, int in1, int in2, int in3);
+     void imInitiatedHide();
+     void keyEvent(int in0, int in1, int in2, const QString &in3, bool in4, int in5, uchar in6);

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Qt 5 Sample
+Exec=/opt/qt5-sample/bin/qt5-sample
+Icon=/usr/share/icons/hicolor/80x80/apps/qt5-sample80.png
+X-Window-Icon=
+X-HildonDesk-ShowInToolbar=true
+X-Osso-Type=application/x-executable

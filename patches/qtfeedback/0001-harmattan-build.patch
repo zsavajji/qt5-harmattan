@@ -1,0 +1,40 @@
+Harmattan build: headers into Qt's include directory, a plain meegotouch plugin
+
+Sailfish's qtfeedback installs its headers to /usr/include/qt5 (outside a cross build's
+sysroot) and builds no backends (its plugin .pro files use QT += feedback, which this non-module
+build doesn't provide). The meegotouch plugin is now a plain plugin that links the library
+directly, and no longer libmeegotouchcore (Qt 4's).
+
+--- a/src/feedback/feedback.pro
++++ b/src/feedback/feedback.pro
+@@ -35,7 +35,7 @@
+            qfeedbackplugin.cpp
+ 
+ public_headers.files = $$PUBLIC_HEADERS
+-public_headers.path = /usr/include/qt$${QT_MAJOR_VERSION}/QtFeedback
++public_headers.path = $$[QT_INSTALL_HEADERS]/QtFeedback
+ 
+ target.path = $$[QT_INSTALL_LIBS]
+ 
+--- a/src/plugins/feedback/meegotouch/meegotouch.pro
++++ b/src/plugins/feedback/meegotouch/meegotouch.pro
+@@ -1,10 +1,15 @@
++# Harmattan: a plain plugin (this repository is no Qt module build, so QT += feedback is not
++# available) that talks to meegofeedbackd itself: Qt 4's libmeegotouchcore can't be loaded.
+ TARGET = qtfeedback_meegotouch
+-QT = core feedback
++TEMPLATE = lib
++CONFIG += plugin hide_symbols
++QT = core network
+ 
+-PLUGIN_TYPE = feedback
+-load(qt_plugin)
++INCLUDEPATH += ../../../feedback
++LIBS += -L$$OUT_PWD/../../../feedback -lQt$${QT_MAJOR_VERSION}Feedback
+ 
+ HEADERS += qfeedback.h
+ SOURCES += qfeedback.cpp
+ 
+-LIBS += -lmeegotouchcore
++target.path = $$[QT_INSTALL_PLUGINS]/feedback
++INSTALLS += target

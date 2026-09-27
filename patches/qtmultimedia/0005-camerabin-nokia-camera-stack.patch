@@ -1,0 +1,370 @@
+camerabin: Nokia's camera stack on the N9, viewfinder without a copy
+
+With GStreamer 0.10, when the phone has Nokia's subdevsrc2, the camera source is camsrcbin with
+subdevsrc2 as its video source (as the stock camera's libqcamera): subdevsrc as the camera
+source failed to reach READY. The cameras are listed through subdevsrc2 ("primary",
+"secondary", its camera-device property; camsrcbin would list the ISP's V4L2 nodes) by the
+plugin, the service's device control and its info control, so they agree. subdevsrc2 offers
+YUY2 but sends UYVY: UYVY is asked for unless the app sets a format. The V4L2 parameter query
+is skipped for those camera names (no V4L2 node; subdevsrc2 has GstPhotography).
+
+The viewfinder uses gltexturesink (0002), but the camera must start with it: switched in while
+starting, Nokia's source hung in the reload. So the camera's renderer is ready only once
+VideoOutput has its OpenGL context (the player's isn't gated: resuming after a pause stalled),
+and the renderer reacts to that context later, from the event loop (VideoOutput sets it
+holding its frame mutex, which a reload's surface stop takes).
+
+--- a/src/gsttools/qgstreamervideorenderer.cpp
++++ b/src/gsttools/qgstreamervideorenderer.cpp
+@@ -135,14 +135,22 @@
+ }
+ 
+ #if !GST_CHECK_VERSION(1,0,0)
++// The texture sink needs the videonode plugin (the surface takes its frames) and the overlay
++// framebuffer's memory (root:video; apps get it with Aegis' GRP::video).
++bool QGstreamerVideoRenderer::textureSinkPossible() const
++{
++    return m_surface
++            && !m_surface->supportedPixelFormats(HarmattanTextureHandle).isEmpty()
++            && access("/dev/fb2", R_OK | W_OK) == 0;
++}
++
+ GstElement *QGstreamerVideoRenderer::createTextureSink()
+ {
+     // The surface takes these frames only with the videonode plugin, and gives its OpenGL
+     // context once VideoOutput has rendered (eventFilter() then switches sinks). The sink hands
+     // frames over only from the overlay framebuffer's memory (the DSP decodes into it), which is
+     // root:video: apps get it with Aegis' GRP::video, others keep the copying sink.
+-    if (m_surface->supportedPixelFormats(HarmattanTextureHandle).isEmpty()
+-            || access("/dev/fb2", R_OK | W_OK) != 0)
++    if (!textureSinkPossible())
+         return nullptr;
+     auto *context = qobject_cast<QOpenGLContext *>(m_surface->property("GLContext").value<QObject *>());
+     if (!context || !context->nativeHandle().canConvert<QEGLNativeContext>())
+@@ -208,14 +216,53 @@
+ bool QGstreamerVideoRenderer::eventFilter(QObject *watched, QEvent *event)
+ {
+     if (watched == m_surface && event->type() == QEvent::DynamicPropertyChange
+-            && static_cast<QDynamicPropertyChangeEvent *>(event)->propertyName() == "GLContext"
+-            && m_videoSink && !m_textureSink) {
+-        resetSink(m_videoSink);
+-        emit sinkChanged();
++            && static_cast<QDynamicPropertyChangeEvent *>(event)->propertyName() == "GLContext") {
++        // Later: VideoOutput sets the property in updatePaintNode() holding its frame mutex (on
++        // the GUI thread with the basic render loop), and a user's reload stops the surface,
++        // which takes that mutex.
++        QMetaObject::invokeMethod(this, "handleGLContext", Qt::QueuedConnection);
+     }
+     return false;
+ }
++
++void QGstreamerVideoRenderer::handleGLContext()
++{
++    if (m_surface) {
++        // Switch only to a texture sink that could be made: a switch reloads the user's
++        // pipeline (the camera's hung when reloaded while starting).
++        if (m_videoSink && !m_textureSink) {
++            if (GstElement *sink = createTextureSink()) {
++                resetSink(m_videoSink, sink);
++                m_textureSink = true;
++                emit sinkChanged();
++            }
++        }
++        // Only on a change: VideoOutput sets the property again (stopping the surface, for
++        // one), and every readyChanged restarts a waiting camera, which stops the surface.
++        const bool ready = isReady();
++        if (ready != m_reportedReady) {
++            m_reportedReady = ready;
++            emit readyChanged(ready);
++        }
++    }
++}
++#endif
++
++bool QGstreamerVideoRenderer::isReady() const
++{
++    if (!m_surface)
++        return false;
++#if !GST_CHECK_VERSION(1,0,0)
++    // Harmattan: for the camera (CameraBinSession sets the property), when the texture sink is
++    // possible, ready once VideoOutput has its OpenGL context: the camera then starts once with
++    // its final sink instead of with the copying one, switched while starting (Nokia's camera
++    // source hung in that reload). Not for the player: resuming after a pause stalled.
++    if (property("_q_waitForGLContext").toBool() && textureSinkPossible()
++            && !m_surface->property("GLContext").value<QObject *>())
++        return false;
+ #endif
++    return true;
++}
+ 
+ void QGstreamerVideoRenderer::stopRenderer()
+ {
+@@ -253,6 +300,9 @@
+ #endif
+         }
+ 
++#if !GST_CHECK_VERSION(1,0,0)
++        m_reportedReady = isReady();
++#endif
+         if (wasReady != isReady())
+             emit readyChanged(isReady());
+ 
+--- a/src/gsttools/qgstreamervideorenderer_p.h
++++ b/src/gsttools/qgstreamervideorenderer_p.h
+@@ -78,7 +78,7 @@
+     void setVideoSink(GstElement *) override;
+ 
+     void stopRenderer() override;
+-    bool isReady() const override { return m_surface != 0; }
++    bool isReady() const override;
+ 
+ signals:
+     void sinkChanged();
+@@ -88,15 +88,18 @@
+     void handleFormatChange();
+ #if !GST_CHECK_VERSION(1,0,0)
+     void presentTextureFrame(int frame);
++    void handleGLContext();
+ #endif
+ 
+ private:
+ #if !GST_CHECK_VERSION(1,0,0)
+     bool eventFilter(QObject *watched, QEvent *event) override;
++    bool textureSinkPossible() const;
+     GstElement *createTextureSink();
+     static void handleFrameReady(GstElement *sink, gint frame, gpointer data);
+ 
+     bool m_textureSink = false;
++    bool m_reportedReady = false;
+     QMutex m_mutex;
+     QWaitCondition m_presented;
+ #endif
+--- a/src/plugins/gstreamer/camerabin/camerabinservice.cpp
++++ b/src/plugins/gstreamer/camerabin/camerabinservice.cpp
+@@ -80,8 +80,10 @@
+ 
+ QT_BEGIN_NAMESPACE
+ 
+-CameraBinService::CameraBinService(GstElementFactory *sourceFactory, QObject *parent):
++CameraBinService::CameraBinService(GstElementFactory *sourceFactory, GstElementFactory *camerasFactory,
++                                   QObject *parent):
+     QMediaService(parent),
++    m_camerasFactory(camerasFactory),
+     m_cameraInfoControl(0),
+     m_viewfinderSettingsControl(0),
+     m_viewfinderSettingsControl2(0)
+@@ -101,7 +103,8 @@
+     m_imageCaptureControl = 0;
+ 
+     m_captureSession = new CameraBinSession(sourceFactory, this);
+-    m_videoInputDevice = new QGstreamerVideoInputDeviceControl(sourceFactory, m_captureSession);
++    // The same camera names as the plugin's: QCamera drops a service without the one it asked for.
++    m_videoInputDevice = new QGstreamerVideoInputDeviceControl(camerasFactory, m_captureSession);
+     m_imageCaptureControl = new CameraBinImageCapture(m_captureSession);
+ 
+     connect(m_videoInputDevice, SIGNAL(selectedDeviceChanged(QString)),
+@@ -111,6 +114,10 @@
+         m_captureSession->setDevice(m_videoInputDevice->deviceName(m_videoInputDevice->selectedDevice()));
+ 
+     m_videoRenderer = new QGstreamerVideoRenderer(this);
++#if !GST_CHECK_VERSION(1,0,0)
++    // Harmattan: the camera waits for VideoOutput's OpenGL context (QGstreamerVideoRenderer::isReady()).
++    m_videoRenderer->setProperty("_q_waitForGLContext", true);
++#endif
+ 
+     m_videoWindow = new QGstreamerVideoWindow(this);
+     // If the GStreamer video sink is not available, don't provide the video window control since
+@@ -242,7 +249,7 @@
+ 
+     if (qstrcmp(name, QCameraInfoControl_iid) == 0) {
+         if (!m_cameraInfoControl)
+-            m_cameraInfoControl = new CameraBinInfoControl(m_captureSession->sourceFactory(), this);
++            m_cameraInfoControl = new CameraBinInfoControl(m_camerasFactory, this);
+         return m_cameraInfoControl;
+     }
+ 
+--- a/src/plugins/gstreamer/camerabin/camerabinservice.h
++++ b/src/plugins/gstreamer/camerabin/camerabinservice.h
+@@ -68,7 +68,8 @@
+     Q_OBJECT
+ 
+ public:
+-    CameraBinService(GstElementFactory *sourceFactory, QObject *parent = 0);
++    // camerasFactory lists the cameras (Nokia's subdevsrc2 for its camsrcbin on the N9).
++    CameraBinService(GstElementFactory *sourceFactory, GstElementFactory *camerasFactory, QObject *parent = 0);
+     virtual ~CameraBinService();
+ 
+     QMediaControl *requestControl(const char *name) override;
+@@ -80,6 +81,7 @@
+     void setAudioPreview(GstElement*);
+ 
+     CameraBinSession *m_captureSession;
++    GstElementFactory *m_camerasFactory; // the plugin's, alive while services are
+     CameraBinMetaData *m_metaDataControl;
+ 
+     QAudioInputSelectorControl *m_audioInputSelector;
+--- a/src/plugins/gstreamer/camerabin/camerabinserviceplugin.cpp
++++ b/src/plugins/gstreamer/camerabin/camerabinserviceplugin.cpp
+@@ -60,6 +60,8 @@
+ {
+     if (m_sourceFactory)
+         gst_object_unref(GST_OBJECT(m_sourceFactory));
++    if (m_videoSourceFactory)
++        gst_object_unref(GST_OBJECT(m_videoSourceFactory));
+ }
+ 
+ QMediaService* CameraBinServicePlugin::create(const QString &key)
+@@ -77,7 +79,7 @@
+             return nullptr;
+         }
+ 
+-        return new CameraBinService(sourceFactory());
++        return new CameraBinService(sourceFactory(), camerasFactory());
+     }
+ 
+     qWarning() << "Gstreamer camerabin service plugin: unsupported key:" << key;
+@@ -101,7 +103,7 @@
+ QByteArray CameraBinServicePlugin::defaultDevice(const QByteArray &service) const
+ {
+     return service == Q_MEDIASERVICE_CAMERA
+-            ? QGstUtils::enumerateCameras(sourceFactory()).value(0).name.toUtf8()
++            ? QGstUtils::enumerateCameras(camerasFactory()).value(0).name.toUtf8()
+             : QByteArray();
+ }
+ 
+@@ -109,14 +111,14 @@
+ {
+ 
+     return service == Q_MEDIASERVICE_CAMERA
+-            ? QGstUtils::cameraDevices(sourceFactory())
++            ? QGstUtils::cameraDevices(camerasFactory())
+             : QList<QByteArray>();
+ }
+ 
+ QString CameraBinServicePlugin::deviceDescription(const QByteArray &service, const QByteArray &deviceName)
+ {
+     return service == Q_MEDIASERVICE_CAMERA
+-            ? QGstUtils::cameraDescription(deviceName, sourceFactory())
++            ? QGstUtils::cameraDescription(deviceName, camerasFactory())
+             : QString();
+ }
+ 
+@@ -130,12 +132,12 @@
+ 
+ QCamera::Position CameraBinServicePlugin::cameraPosition(const QByteArray &deviceName) const
+ {
+-    return QGstUtils::cameraPosition(deviceName, m_sourceFactory);
++    return QGstUtils::cameraPosition(deviceName, camerasFactory());
+ }
+ 
+ int CameraBinServicePlugin::cameraOrientation(const QByteArray &deviceName) const
+ {
+-    return QGstUtils::cameraOrientation(deviceName, m_sourceFactory);
++    return QGstUtils::cameraOrientation(deviceName, camerasFactory());
+ }
+ 
+ GstElementFactory *CameraBinServicePlugin::sourceFactory() const
+@@ -149,6 +151,19 @@
+         if (!envCandidate.isEmpty())
+             factory = gst_element_factory_find(envCandidate.constData());
+ 
++#if !GST_CHECK_VERSION(1,0,0)
++        // The N9: Nokia's camera stack is camsrcbin with subdevsrc2 as its video source (as the
++        // stock camera's libqcamera); subdevsrc as the camera source failed to reach READY.
++        if (!factory) {
++            if (GstElementFactory *video = gst_element_factory_find("subdevsrc2")) {
++                // Loaded, as below: an unloaded factory has no element type (no cameras listed).
++                m_videoSourceFactory = GST_ELEMENT_FACTORY(gst_plugin_feature_load(GST_PLUGIN_FEATURE(video)));
++                gst_object_unref(GST_OBJECT(video));
++                if (m_videoSourceFactory)
++                    factory = gst_element_factory_find("camsrcbin");
++            }
++        }
++#endif
+         static const char *candidates[] = { "subdevsrc", "wrappercamerabinsrc" };
+         for (int i = 0; !factory && i < lengthOf(candidates); ++i)
+             factory = gst_element_factory_find(candidates[i]);
+@@ -163,4 +178,16 @@
+     return m_sourceFactory;
+ }
+ 
++// The factory the cameras are listed with: the video source for Nokia's camsrcbin (its
++// "camera-device" gives the primary and secondary cameras; camsrcbin itself would make Qt list
++// the ISP's V4L2 nodes), else the camera source.
++GstElementFactory *CameraBinServicePlugin::camerasFactory() const
++{
++    GstElementFactory *source = sourceFactory();
++    if (source && m_videoSourceFactory
++            && qstrcmp(GST_PLUGIN_FEATURE_NAME(source), "camsrcbin") == 0)
++        return m_videoSourceFactory;
++    return source;
++}
++
+ QT_END_NAMESPACE
+--- a/src/plugins/gstreamer/camerabin/camerabinserviceplugin.h
++++ b/src/plugins/gstreamer/camerabin/camerabinserviceplugin.h
+@@ -80,8 +80,10 @@
+ 
+ private:
+     GstElementFactory *sourceFactory() const;
++    GstElementFactory *camerasFactory() const;
+ 
+     mutable GstElementFactory *m_sourceFactory;
++    mutable GstElementFactory *m_videoSourceFactory = nullptr;
+ };
+ 
+ QT_END_NAMESPACE
+--- a/src/plugins/gstreamer/camerabin/camerabinsession.cpp
++++ b/src/plugins/gstreamer/camerabin/camerabinsession.cpp
+@@ -425,6 +425,13 @@
+     setCaptureCaps(VIDEO_CAPTURE_CAPS_PROPERTY, caps);
+     gst_caps_unref(caps);
+ 
++#if !GST_CHECK_VERSION(1,0,0)
++    // subdevsrc2 (the N9) also offers YUY2 but its frames are UYVY: gltexturesink, which takes
++    // both, got YUY2 and the viewfinder was purple and green. UYVY unless the app asks.
++    if (viewfinderPixelFormat == QVideoFrame::Format_Invalid && m_videoSrc
++            && qstrcmp(qt_gst_element_get_factory_name(m_videoSrc), "subdevsrc2") == 0)
++        viewfinderPixelFormat = QVideoFrame::Format_UYVY;
++#endif
+     caps = resolutionToCaps(viewfinderResolution, viewfinderFrameRate, viewfinderPixelFormat);
+     setCaptureCaps(VIEWFINDER_CAPS_PROPERTY, caps);
+     gst_caps_unref(caps);
+@@ -573,6 +580,11 @@
+                     m_videoSrc = m_videoInputFactory->buildElement();
+                 }
+ 
++#if !GST_CHECK_VERSION(1,0,0)
++                // The N9: Nokia's camsrcbin runs with subdevsrc2 (see the service plugin).
++                if (!m_videoSrc && qstrcmp(qt_gst_element_get_factory_name(m_cameraSrc), "camsrcbin") == 0)
++                    m_videoSrc = gst_element_factory_make("subdevsrc2", "camera_source");
++#endif
+                 if (!m_videoSrc)
+                     m_videoSrc = gst_element_factory_make("v4l2src", "camera_source");
+ 
+@@ -595,6 +607,12 @@
+ 
+                 if (g_object_class_find_property(G_OBJECT_GET_CLASS(m_videoSrc), "device-index"))
+                     g_object_set(G_OBJECT(m_videoSrc), "device-index", m_inputDevice.toInt(), NULL);
++
++                // subdevsrc2 (the N9): the cameras are "primary" and "secondary" (the service
++                // plugin lists them through it), as for a camera source with this property.
++                if (g_object_class_find_property(G_OBJECT_GET_CLASS(m_videoSrc), "camera-device"))
++                    g_object_set(G_OBJECT(m_videoSrc), "camera-device",
++                                 m_inputDevice == QLatin1String("secondary") ? 1 : 0, NULL);
+             }
+         } else if (g_object_class_find_property(G_OBJECT_GET_CLASS(m_cameraSrc), "camera-device")) {
+             if (m_inputDevice == QLatin1String("secondary")) {
+--- a/src/plugins/gstreamer/camerabin/camerabinv4limageprocessing.cpp
++++ b/src/plugins/gstreamer/camerabin/camerabinv4limageprocessing.cpp
+@@ -275,6 +275,10 @@
+     if (cameraStatus == QCamera::UnloadedStatus)
+         m_parametersInfo.clear();
+     else if (cameraStatus == QCamera::LoadedStatus) {
++        // Nokia's subdevsrc2 (the N9) names its cameras "primary" and "secondary": no V4L2
++        // node to query (it has GstPhotography instead).
++        if (!m_session->device().startsWith(QLatin1Char('/')))
++            return;
+         V4LDeviceResource resource(m_session, O_RDONLY);
+         if (resource.fd() == -1) {
+             qWarning() << "Unable to open device to query parameter info";

@@ -1,0 +1,28 @@
+Qt 5 SDK: release build, headers under Qt's include directory
+
+diff --git a/common-config.pri b/common-config.pri
+index a4736ca..0f963c0 100644
+--- a/common-config.pri
++++ b/common-config.pri
+@@ -6,7 +6,7 @@
+ 
+ QT += dbus
+ QT -= gui
+-CONFIG += debug
++CONFIG += release # Qt 5 SDK: an optimized client library
+ CONFIG += thread
+ 
+ # Maemo specific options
+diff --git a/common-install.pri b/common-install.pri
+index bc1b2ae..1826077 100644
+--- a/common-install.pri
++++ b/common-install.pri
+@@ -8,7 +8,7 @@
+ QT -= gui
+ 
+ # Path for headers - remember to add files if they should be installed
+-publicheaders.path = /usr/include/sensord-qt$${QT_MAJOR_VERSION}
++publicheaders.path = $$[QT_INSTALL_HEADERS]/sensord-qt$${QT_MAJOR_VERSION}
+ PLUGINPATH = $$[QT_INSTALL_LIBS]/sensord-qt$${QT_MAJOR_VERSION}
+ 
+ # Path for shared libraries

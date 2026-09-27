@@ -1,0 +1,400 @@
+diff --git a/src/meego/mdeclarativemousefilter.cpp b/src/meego/mdeclarativemousefilter.cpp
+index ebd2a898..9875085b 100644
+--- a/src/meego/mdeclarativemousefilter.cpp
++++ b/src/meego/mdeclarativemousefilter.cpp
+@@ -40,203 +40,166 @@
+ 
+ #include "mdeclarativemousefilter.h"
+ #include <QtCore/QEvent>
+-#include <QGraphicsSceneMouseEvent>
+ #include <math.h>
+-#include <QGraphicsScene>
++#include <QtCore/QCoreApplication>
++#include <QtQuick/QQuickWindow>
+ #include <QDebug>
+ 
+ static const int PressAndHoldDelay = 800;
+ // Threshold in QDeclarativeFlickable is 20, for press and hold we'll need 30 (30*30=900)
+ static const int FlickThresholdSquare = 900;
+ 
+-MDeclarativeMouseFilter::MDeclarativeMouseFilter(QDeclarativeItem *parent) :
+-    QDeclarativeItem(parent),
++MDeclarativeMouseFilter::MDeclarativeMouseFilter(QQuickItem *parent) :
++    QQuickItem(parent),
+     pressAndHoldTimerId(-1),
+-    delayedPressEvent(0),
++    forwarding(false),
+     lastPos(QPoint(0,0))
+ {
+-    setFlag(ItemHasNoContents, true);
++    setFlag(ItemHasContents, false);
+     setAcceptedMouseButtons(Qt::LeftButton);
+ }
+ 
+ MDeclarativeMouseFilter::~MDeclarativeMouseFilter()
+ {
+-    if(delayedPressEvent) {
+-        delete delayedPressEvent;
+-        delayedPressEvent = 0;
+-    }
+ }
+ 
+-void MDeclarativeMouseFilter::itemChange(ItemChange change, const ItemChangeData &)
++void MDeclarativeMouseFilter::itemChange(ItemChange change, const ItemChangeData &value)
+ {
+     if (change == QQuickItem::ItemParentHasChanged || change == QQuickItem::ItemSceneChange) {
+-        if (parentItem()) {
+-            parentItem()->setFiltersChildMouseEvents(true);
++        if (parentItem())
+             setKeepMouseGrab(true);
+-        }
+     }
++    QQuickItem::itemChange(change, value);
+ }
+ 
+-bool MDeclarativeMouseFilter::event(QEvent *event)
++// X is clamped to the filter's area, Y to the parent's (as in Qt 4).
++QPointF MDeclarativeMouseFilter::clamped(const QPointF &pos) const
+ {
+-    switch (event->type()) {
+-    case QEvent::GraphicsSceneMouseDoubleClick: {
+-        QGraphicsSceneMouseEvent *me = static_cast <QGraphicsSceneMouseEvent *>(event);
+-        clampMousePosition(me);
+-
+-        QPointF mappedPos = static_cast<QGraphicsItem*>(parentItem())->mapFromItem(this, me->pos());
+-        MDeclarativeMouseEvent mdme(mappedPos);
+-        emit doubleClicked(&mdme);
+-        if (mdme.isFiltered())
+-            return true;
+-        break;
+-    }
+-    case QEvent::GraphicsSceneMousePress: {
+-        QGraphicsSceneMouseEvent *me = static_cast <QGraphicsSceneMouseEvent *>(event);
+-        clampMousePosition(me);
+-
+-        QPointF mappedPos = static_cast<QGraphicsItem*>(parentItem())->mapFromItem(this, me->pos());
+-        lastPos.setX(mappedPos.x());
+-        lastPos.setY(mappedPos.y());
+-        setKeepMouseGrab(true);
+-        if (delayedPressEvent) {
+-            delete delayedPressEvent;
+-            delayedPressEvent = 0;
+-        }
+-        delayedPressEvent = copyMouseEvent(me);
+-        // Launch press and hold timer
+-        pressAndHoldTimerId = startTimer(PressAndHoldDelay);
+-        MDeclarativeMouseEvent mdme(mappedPos);
+-        emit pressed(&mdme);
+-        if (mdme.isFiltered()) {
+-            me->accept();
+-            return true;
+-        }
+-        break;
+-    }
+-    case QEvent::GraphicsSceneMouseMove: {
+-        QGraphicsSceneMouseEvent *me = static_cast <QGraphicsSceneMouseEvent *>(event);
+-        QPointF dist = me->pos() - me->buttonDownPos(Qt::LeftButton);
++    const qreal top = -y();
++    const qreal bottom = parentItem() ? parentItem()->height() - y() - 1 : height();
++    return QPointF(qBound<qreal>(0, pos.x(), width()), qBound(top, pos.y(), qMax(top, bottom)));
++}
+ 
+-        clampMousePosition(me);
++QPointF MDeclarativeMouseFilter::toParent(const QPointF &pos) const
++{
++    return parentItem() ? mapToItem(parentItem(), pos) : pos;
++}
+ 
+-        QPointF mappedPos = static_cast<QGraphicsItem*>(parentItem())->mapFromItem(this, me->pos());
+-        lastPos.setX(mappedPos.x());
+-        lastPos.setY(mappedPos.y());
+-        MDeclarativeMouseEvent mdme(mappedPos);
++void MDeclarativeMouseFilter::forward(QEvent::Type type, const QPointF &pos, Qt::MouseButton button,
++                                      Qt::MouseButtons buttons, QMouseEvent *original)
++{
++    QQuickItem *target = parentItem();
++    if (!target)
++        return;
++    const QPointF windowPos = mapToScene(pos);
++    const QPointF screenPos = window() ? QPointF(window()->mapToGlobal(windowPos.toPoint())) : windowPos;
++    QMouseEvent event(type, mapToItem(target, pos), windowPos, screenPos, button, buttons,
++                      original ? original->modifiers() : Qt::NoModifier);
++    if (original)
++        event.setTimestamp(original->timestamp());
++    QCoreApplication::sendEvent(target, &event);
++}
+ 
+-        if (pressAndHoldTimerId != -1 && (dist.x() * dist.x()) + (dist.y() * dist.y()) > FlickThresholdSquare) {
+-            killTimer(pressAndHoldTimerId);
+-            pressAndHoldTimerId = -1;
+-            if (abs(dist.x()) < abs(dist.y())) {
+-                setKeepMouseGrab(false);
+-                if (scene() && parentItem() && delayedPressEvent) {
+-                    scene()->sendEvent(parentItem(), delayedPressEvent);
+-                    emit delayedPressSent();
+-                    return true;
+-                }
+-            } else {
+-                emit horizontalDrag();
+-
+-                // Reset the mouse sequence to apply selectByMouse changes from QML side
+-                if (scene() && parentItem() && delayedPressEvent) {
+-                    scene()->sendEvent(parentItem(), delayedPressEvent);
+-                    return true;
+-                }
+-            }
+-        } else if (pressAndHoldTimerId == -1){
+-            emit mousePositionChanged(&mdme);
+-            if (mdme.isFiltered())
+-                return true;
+-        }
+-        if (pressAndHoldTimerId != -1) {
+-            return true;
+-        }
+-        break;
++void MDeclarativeMouseFilter::stopPressAndHold()
++{
++    if (pressAndHoldTimerId != -1) {
++        killTimer(pressAndHoldTimerId);
++        pressAndHoldTimerId = -1;
+     }
+-    case QEvent::GraphicsSceneMouseRelease: {
+-        if (pressAndHoldTimerId != -1) {
+-            killTimer(pressAndHoldTimerId);
+-            pressAndHoldTimerId=-1;
+-        }
+-        QGraphicsSceneMouseEvent *me = static_cast <QGraphicsSceneMouseEvent *>(event);
+-        clampMousePosition(me);
++}
++
++void MDeclarativeMouseFilter::mousePressEvent(QMouseEvent *event)
++{
++    const QPointF pos = clamped(event->localPos());
++    const QPointF mappedPos = toParent(pos);
++    pressPos = pos;
++    forwarding = false;
++    lastPos = mappedPos.toPoint();
++    setKeepMouseGrab(true);
++    stopPressAndHold();
++    pressAndHoldTimerId = startTimer(PressAndHoldDelay);
++    event->accept(); // keep the grab: the rest of the gesture comes here
++
++    MDeclarativeMouseEvent mdme(mappedPos);
++    emit pressed(&mdme);
++    if (!mdme.isFiltered())
++        forward(QEvent::MouseButtonPress, pos, Qt::LeftButton, Qt::LeftButton, event);
++}
++
++void MDeclarativeMouseFilter::mouseMoveEvent(QMouseEvent *event)
++{
++    const QPointF pos = clamped(event->localPos());
++    const QPointF dist = pos - pressPos;
++    const QPointF mappedPos = toParent(pos);
++    lastPos = mappedPos.toPoint();
+ 
+-        QPointF mappedPos = static_cast<QGraphicsItem*>(parentItem())->mapFromItem(this, me->pos());
++    if (forwarding) {
++        forward(QEvent::MouseMove, pos, Qt::NoButton, Qt::LeftButton, event);
+         MDeclarativeMouseEvent mdme(mappedPos);
++        emit mousePositionChanged(&mdme);
++        return;
++    }
+ 
+-        emit released(&mdme);
+-        if (mdme.isFiltered()) {
+-            emit finished();
+-            return true;            
++    if (pressAndHoldTimerId != -1 && (dist.x() * dist.x()) + (dist.y() * dist.y()) > FlickThresholdSquare) {
++        stopPressAndHold();
++        if (qAbs(dist.x()) < qAbs(dist.y())) {
++            // Vertical: the parent gets the press, as a tap would, and a Flickable may take over.
++            setKeepMouseGrab(false);
++            forward(QEvent::MouseButtonPress, pressPos, Qt::LeftButton, Qt::LeftButton, event);
++            emit delayedPressSent();
++        } else {
++            // Horizontal: QML turns selectByMouse on; the parent selects from the press point.
++            emit horizontalDrag();
++            forward(QEvent::MouseButtonPress, pressPos, Qt::LeftButton, Qt::LeftButton, event);
++            forwarding = true;
++            forward(QEvent::MouseMove, pos, Qt::NoButton, Qt::LeftButton, event);
+         }
+-        bool ret = QDeclarativeItem::event(event);
+-        emit finished();
+-        return ret;
++        return;
+     }
+-    case QEvent::UngrabMouse: {
+-        if (pressAndHoldTimerId != -1) {
+-            killTimer(pressAndHoldTimerId);
+-            pressAndHoldTimerId=-1;
+-        }
+ 
+-        setKeepMouseGrab(true);
+-        break;
+-    }
+-    default:
+-        break;
++    if (pressAndHoldTimerId == -1) {
++        MDeclarativeMouseEvent mdme(mappedPos);
++        emit mousePositionChanged(&mdme);
+     }
+-
+-    return QDeclarativeItem::event(event);
+ }
+ 
+-void MDeclarativeMouseFilter::timerEvent(QTimerEvent *ev)
++void MDeclarativeMouseFilter::mouseReleaseEvent(QMouseEvent *event)
+ {
+-    if (ev->timerId() == pressAndHoldTimerId) {
+-        killTimer(pressAndHoldTimerId);
+-        pressAndHoldTimerId = -1;
+-        MDeclarativeMouseEvent mdme(lastPos);
++    stopPressAndHold();
++    const QPointF pos = clamped(event->localPos());
++    if (forwarding)
++        forward(QEvent::MouseButtonRelease, pos, Qt::LeftButton, Qt::NoButton, event);
++    forwarding = false;
++
++    MDeclarativeMouseEvent mdme(toParent(pos));
++    emit released(&mdme);
++    emit finished();
++}
+ 
+-        emit pressAndHold(&mdme);
++void MDeclarativeMouseFilter::mouseDoubleClickEvent(QMouseEvent *event)
++{
++    const QPointF pos = clamped(event->localPos());
++    MDeclarativeMouseEvent mdme(toParent(pos));
++    emit doubleClicked(&mdme); // may turn selectByMouse on
++    if (!mdme.isFiltered()) {
++        // With selectByMouse on, the text input selects the word under a double click.
++        forward(QEvent::MouseButtonDblClick, pos, Qt::LeftButton, Qt::LeftButton, event);
+     }
++    event->accept();
+ }
+ 
+-
+-QGraphicsSceneMouseEvent *MDeclarativeMouseFilter::copyMouseEvent (QGraphicsSceneMouseEvent *event)
++void MDeclarativeMouseFilter::mouseUngrabEvent()
+ {
+-    QGraphicsSceneMouseEvent *ret;
+-    ret = new QGraphicsSceneMouseEvent(event->type());
+-    ret->setAccepted(false);
+-    for (int i = 0x1; i <= 0x10; i <<= 1) {
+-        if (event->buttons() & i) {
+-            Qt::MouseButton button = Qt::MouseButton(i);
+-            ret->setButtonDownPos(button, QGraphicsItem::mapToItem(parentItem(),event->buttonDownPos(button)));
+-            ret->setButtonDownScenePos(button, event->buttonDownScenePos(button));
+-            ret->setButtonDownScreenPos(button, event->buttonDownScreenPos(button));
+-        }
+-    }
+-    ret->setButtons(event->buttons());
+-    ret->setButton(event->button());
+-    ret->setPos(QGraphicsItem::mapToItem(parentItem(),event->pos()));
+-    ret->setScenePos(event->scenePos());
+-    ret->setScreenPos(event->screenPos());
+-    ret->setLastPos(QGraphicsItem::mapToItem(parentItem(),event->lastPos()));
+-    ret->setLastScenePos(event->lastScenePos());
+-    ret->setLastScreenPos(event->lastScreenPos());
+-    ret->setModifiers(event->modifiers());
+-    return ret;
++    stopPressAndHold();
++    forwarding = false;
++    setKeepMouseGrab(true);
+ }
+ 
+-void MDeclarativeMouseFilter::clampMousePosition(QGraphicsSceneMouseEvent *me)
++void MDeclarativeMouseFilter::timerEvent(QTimerEvent *ev)
+ {
+-    // Clamp position in MouseFilter coordinates.
+-    // X position is clamped to MouseFilter area.
+-    // Y position is clamped to parent item area.
+-    QRectF targetRect = QRectF(0,-y(),width(),parentItem()->height());
+-    me->setPos(QPointF(qBound(targetRect.x(), me->pos().x(),targetRect.x()+targetRect.width()),
+-        qBound(targetRect.y(), me->pos().y(), targetRect.y()+targetRect.height()-1)));
+-    me->setLastPos(QPointF(qBound(targetRect.x(), me->lastPos().x(),targetRect.x()+targetRect.width()),
+-        qBound(targetRect.y(), me->lastPos().y(),targetRect.y()+targetRect.height()-1)));
+-    me->setButtonDownPos(Qt::LeftButton, QPointF(qBound(targetRect.x(), me->buttonDownPos(Qt::LeftButton).x(), targetRect.x()+targetRect.width()),
+-        qBound(targetRect.y(), me->buttonDownPos(Qt::LeftButton).y(), targetRect.y()+targetRect.height()-1)));
++    if (ev->timerId() == pressAndHoldTimerId) {
++        stopPressAndHold();
++        MDeclarativeMouseEvent mdme(lastPos);
++        emit pressAndHold(&mdme);
++    }
+ }
+diff --git a/src/meego/mdeclarativemousefilter.h b/src/meego/mdeclarativemousefilter.h
+index 5d560b43..ac553dde 100644
+--- a/src/meego/mdeclarativemousefilter.h
++++ b/src/meego/mdeclarativemousefilter.h
+@@ -41,7 +41,8 @@
+ #ifndef MDECLARATIVEMOUSEFILTER_H
+ #define MDECLARATIVEMOUSEFILTER_H
+ 
+-#include <QDeclarativeItem>
++#include <QtQuick/QQuickItem>
++#include <QtGui/QMouseEvent>
+ 
+ class QGraphicsSceneMouseEvent;
+ 
+@@ -76,17 +77,21 @@ private:
+     bool _filtered;
+ };
+ 
+-class MDeclarativeMouseFilter : public QDeclarativeItem
++// qt5-harmattan: ported from QGraphicsScene events (which Qt Quick 2 never sends, so
++// press-and-hold, selection and the edit bubble never triggered) to QMouseEvent.
++// Protocol, as TextField/TextArea/SelectableLabel expect it: the press is swallowed and a
++// press-and-hold timer starts; moving vertically hands the press to the parent (the text
++// input) and lets a Flickable take over; moving horizontally starts mouse selection in the
++// parent, which then gets the rest of the gesture; a double click reaches the parent after
++// QML has had a say. Positions given to QML are in the parent's coordinates.
++class MDeclarativeMouseFilter : public QQuickItem
+ {
+     Q_OBJECT
+ 
+ public:
+-    explicit MDeclarativeMouseFilter(QDeclarativeItem *parent = 0);
++    explicit MDeclarativeMouseFilter(QQuickItem *parent = 0);
+     ~MDeclarativeMouseFilter();
+ 
+-private:
+-    QGraphicsSceneMouseEvent *copyMouseEvent (QGraphicsSceneMouseEvent *event);
+-
+ signals:
+     void mousePositionChanged(MDeclarativeMouseEvent *mouse);
+ 
+@@ -97,18 +102,27 @@ signals:
+     void finished(); // sent after release has been handled in the target item
+     void horizontalDrag(); // for initiating the selection
+     void doubleClicked(MDeclarativeMouseEvent *mouse);
+-public slots:
+ 
+ protected:
+-    virtual bool event(QEvent *event);
+-    void itemChange(ItemChange, const ItemChangeData &);
+-    void timerEvent(QTimerEvent *);
+-    void clampMousePosition(QGraphicsSceneMouseEvent *me);
++    void itemChange(ItemChange, const ItemChangeData &) override;
++    void mousePressEvent(QMouseEvent *event) override;
++    void mouseMoveEvent(QMouseEvent *event) override;
++    void mouseReleaseEvent(QMouseEvent *event) override;
++    void mouseDoubleClickEvent(QMouseEvent *event) override;
++    void mouseUngrabEvent() override;
++    void timerEvent(QTimerEvent *) override;
+ 
+ private:
++    QPointF clamped(const QPointF &pos) const;
++    QPointF toParent(const QPointF &pos) const;
++    void forward(QEvent::Type type, const QPointF &pos, Qt::MouseButton button, Qt::MouseButtons buttons,
++                 QMouseEvent *original);
++    void stopPressAndHold();
++
+     int pressAndHoldTimerId;
+-    QGraphicsSceneMouseEvent *delayedPressEvent;
+-    QPoint lastPos;
++    QPointF pressPos;          // in filter coordinates
++    bool forwarding;           // the parent gets the rest of the gesture (selection)
++    QPoint lastPos;            // in parent coordinates
+ };
+ 
+ #endif // MDECLARATIVEMOUSEFILTER_H

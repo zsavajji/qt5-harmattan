@@ -1,0 +1,26 @@
+SelectionHandles: the magnifier follows a dragged handle
+
+It was placed when a handle was pressed and then stayed there (in Qt 4 too). Now it moves with
+the finger, as the magnifier of a long press in the field does.
+
+diff --git a/src/meego/SelectionHandles.qml b/src/meego/SelectionHandles.qml
+--- a/src/meego/SelectionHandles.qml	2026-09-26 18:04:00
++++ b/src/meego/SelectionHandles.qml	2026-09-26 18:04:00
+@@ -103,6 +103,8 @@
+                       }
+                       textInput.select(h,pos); // Select by character
+                       privateIgnoreClose = false;
++                      // qt5-harmattan: the magnifier follows the finger, as the field's own does
++                      rect.updateMagnifierPosition(parent, mouse.x, mouse.y)
+                   }
+                   onReleased: {
+                       Popup.enableOffset( false );
+@@ -208,6 +210,8 @@
+                       }
+                       textInput.select(h,pos); // Select by character
+                       privateIgnoreClose = false;
++                      // qt5-harmattan: the magnifier follows the finger, as the field's own does
++                      rect.updateMagnifierPosition(parent, mouse.x, mouse.y)
+                  }
+                  onReleased: {
+                       Popup.enableOffset( false );

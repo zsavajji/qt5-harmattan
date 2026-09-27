@@ -1,0 +1,15 @@
+diff --git a/src/qml/jsruntime/qv4executablecompilationunit.cpp b/src/qml/jsruntime/qv4executablecompilationunit.cpp
+index 09a1e93..8ba81ff 100644
+--- a/src/qml/jsruntime/qv4executablecompilationunit.cpp
++++ b/src/qml/jsruntime/qv4executablecompilationunit.cpp
+@@ -751,7 +751,9 @@ bool ExecutableCompilationUnit::loadFromDisk(const QUrl &url, const QDateTime &s
+         auto dataPtrRevert = qScopeGuard([this, oldData](){
+             setUnitData(oldData);
+         });
+-        setUnitData(mappedUnit);
++        // qmlcachegen leaves the source name out of ahead-of-time units (they are relocatable):
++        // take it from where the unit was found, or Qt.include() in a .jsc resolves against nothing.
++        setUnitData(mappedUnit, nullptr, url.toString(), url.toString());
+ 
+         if (data->sourceFileIndex != 0
+             && sourcePath != QQmlFile::urlToLocalFileOrQrc(stringAt(data->sourceFileIndex))) {

@@ -1,0 +1,15 @@
+Harmattan: sensord listens on /tmp/sensord.sock
+
+diff --git a/qt-api/socketreader.cpp b/qt-api/socketreader.cpp
+index 8772ad9..9c764d8 100644
+--- a/qt-api/socketreader.cpp
++++ b/qt-api/socketreader.cpp
+@@ -50,7 +50,7 @@ bool SocketReader::initiateConnection(int sessionId)
+     }
+ 
+     socket_ = new QLocalSocket(this);
+-    const char* SOCKET_NAME = "/run/sensord.sock";
++    const char* SOCKET_NAME = "/tmp/sensord.sock"; // Harmattan's sensord
+     QByteArray env = qgetenv("SENSORFW_SOCKET_PATH");
+     if (!env.isEmpty()) {
+         env += SOCKET_NAME;

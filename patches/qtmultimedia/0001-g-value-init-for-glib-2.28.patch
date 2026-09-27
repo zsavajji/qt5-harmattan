@@ -1,0 +1,21 @@
+G_VALUE_INIT for GLib < 2.30
+
+Harmattan has GLib 2.28. The GStreamer 0.10 camera plugin (camerabinfocus.cpp) uses the
+macro outside the GStreamer 1.0 blocks.
+
+diff --git a/src/gsttools/qgstutils_p.h b/src/gsttools/qgstutils_p.h
+index 5a2feec..662dd74 100644
+--- a/src/gsttools/qgstutils_p.h
++++ b/src/gsttools/qgstutils_p.h
+@@ -57,6 +57,11 @@
+ #include <QtCore/qvector.h>
+ #include <gst/gst.h>
+ #include <gst/video/video.h>
++
++// Harmattan's GLib is 2.28; G_VALUE_INIT came in 2.30 (the camera plugin uses it).
++#ifndef G_VALUE_INIT
++#define G_VALUE_INIT { 0, { { 0 } } }
++#endif
+ #include <qaudioformat.h>
+ #include <qcamera.h>
+ #include <qabstractvideobuffer.h>

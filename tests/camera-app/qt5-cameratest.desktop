@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Qt 5 Camera Test
+Exec=/opt/qt5-cameratest/bin/qt5-cameratest
+Icon=/usr/share/icons/hicolor/80x80/apps/qt5-cameratest80.png
+X-Window-Icon=
+X-HildonDesk-ShowInToolbar=true
+X-Osso-Type=application/x-executable

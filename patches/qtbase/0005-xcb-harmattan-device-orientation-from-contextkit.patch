@@ -1,0 +1,223 @@
+diff --git a/src/plugins/platforms/xcb/qxcbharmattanorientation.cpp b/src/plugins/platforms/xcb/qxcbharmattanorientation.cpp
+new file mode 100644
+index 00000000..0cc39174
+--- /dev/null
++++ b/src/plugins/platforms/xcb/qxcbharmattanorientation.cpp
+@@ -0,0 +1,105 @@
++/****************************************************************************
++**
++** Copyright (C) 2026 Andrea Faggin
++**
++** Harmattan device orientation for the xcb platform plugin (qt5-harmattan).
++** Licensed under the LGPL 3 / GPL 2 or 3, as the rest of qtbase.
++**
++****************************************************************************/
++
++#include "qxcbharmattanorientation.h"
++
++#include <QtDBus/QDBusConnection>
++#include <QtDBus/QDBusMessage>
++#include <QtDBus/QDBusMetaType>
++#include <QtDBus/QDBusPendingCallWatcher>
++#include <QtDBus/QDBusVariant>
++#include <QtGui/QGuiApplication>
++#include <QtGui/QScreen>
++#include <qpa/qwindowsysteminterface.h>
++
++QT_BEGIN_NAMESPACE
++
++static const char service[] = "com.nokia.SensorService";
++static const char path[] = "/org/maemo/contextkit/Screen/TopEdge";
++static const char interface[] = "org.maemo.contextkit.Property";
++
++QXcbHarmattanOrientation::QXcbHarmattanOrientation()
++{
++    // ValueChanged(av values, t timestamp)
++    QDBusConnection::systemBus().connect(QLatin1String(service), QLatin1String(path), QLatin1String(interface),
++                                         QStringLiteral("ValueChanged"), this,
++                                         SLOT(valueChanged(QVariantList,qulonglong)));
++    connect(qGuiApp, &QGuiApplication::applicationStateChanged,
++            this, &QXcbHarmattanOrientation::applicationStateChanged);
++    call(QStringLiteral("Get")); // the orientation to start with
++}
++
++void QXcbHarmattanOrientation::call(const QString &method)
++{
++    const QDBusMessage message = QDBusMessage::createMethodCall(QLatin1String(service), QLatin1String(path),
++                                                                QLatin1String(interface), method);
++    auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::systemBus().asyncCall(message), this);
++    connect(watcher, &QDBusPendingCallWatcher::finished, this, &QXcbHarmattanOrientation::replyFinished);
++}
++
++void QXcbHarmattanOrientation::replyFinished(QDBusPendingCallWatcher *watcher)
++{
++    watcher->deleteLater();
++    const QDBusMessage reply = watcher->reply();
++    // Get and Subscribe answer (av values, t timestamp); Unsubscribe answers nothing.
++    if (reply.type() == QDBusMessage::ReplyMessage && !reply.arguments().isEmpty())
++        apply(qdbus_cast<QVariantList>(reply.arguments().at(0)));
++}
++
++void QXcbHarmattanOrientation::valueChanged(const QVariantList &values, qulonglong)
++{
++    apply(values);
++}
++
++void QXcbHarmattanOrientation::applicationStateChanged(Qt::ApplicationState state)
++{
++    const bool subscribe = state == Qt::ApplicationActive;
++    if (subscribe == m_subscribed)
++        return;
++    m_subscribed = subscribe;
++    call(subscribe ? QStringLiteral("Subscribe") : QStringLiteral("Unsubscribe"));
++}
++
++// Screen.TopEdge names the edge of the (natively landscape) display that is up:
++// "top" landscape, "left" portrait, "bottom" landscape inverted, "right" portrait inverted.
++void QXcbHarmattanOrientation::apply(const QVariantList &values)
++{
++    if (values.isEmpty())
++        return; // no value yet
++    QVariant value = values.first();
++    if (value.userType() == qMetaTypeId<QDBusVariant>())
++        value = value.value<QDBusVariant>().variant();
++    const QString edge = value.toString();
++
++    Qt::ScreenOrientation orientation;
++    if (edge == QLatin1String("top"))
++        orientation = Qt::LandscapeOrientation;
++    else if (edge == QLatin1String("left"))
++        orientation = Qt::PortraitOrientation;
++    else if (edge == QLatin1String("bottom"))
++        orientation = Qt::InvertedLandscapeOrientation;
++    else if (edge == QLatin1String("right"))
++        orientation = Qt::InvertedPortraitOrientation;
++    else
++        return;
++
++    QScreen *screen = QGuiApplication::primaryScreen();
++    if (!screen)
++        return;
++    if (!m_maskSet) {
++        // Qt 5 emits QScreen::orientationChanged only for orientations in this mask, which
++        // defaults to none (Qt 6 dropped it). Every app on a phone wants the signal.
++        screen->setOrientationUpdateMask(Qt::PortraitOrientation | Qt::LandscapeOrientation
++                                         | Qt::InvertedPortraitOrientation | Qt::InvertedLandscapeOrientation);
++        m_maskSet = true;
++    }
++    QWindowSystemInterface::handleScreenOrientationChange(screen, orientation);
++}
++
++QT_END_NAMESPACE
+diff --git a/src/plugins/platforms/xcb/qxcbharmattanorientation.h b/src/plugins/platforms/xcb/qxcbharmattanorientation.h
+new file mode 100644
+index 00000000..fc2e8a21
+--- /dev/null
++++ b/src/plugins/platforms/xcb/qxcbharmattanorientation.h
+@@ -0,0 +1,44 @@
++/****************************************************************************
++**
++** Copyright (C) 2026 Andrea Faggin
++**
++** Harmattan device orientation for the xcb platform plugin (qt5-harmattan).
++** Licensed under the LGPL 3 / GPL 2 or 3, as the rest of qtbase.
++**
++****************************************************************************/
++
++#ifndef QXCBHARMATTANORIENTATION_H
++#define QXCBHARMATTANORIENTATION_H
++
++#include <QtCore/QObject>
++#include <QtCore/QVariantList>
++
++QT_BEGIN_NAMESPACE
++
++class QDBusPendingCallWatcher;
++
++// Harmattan: the device orientation, reported as the primary QScreen's orientation. It comes
++// from sensord's ContextKit property Screen.TopEdge on the system bus, which the Qt 4
++// components also read; their ContextKit library is Qt 4, so this talks D-Bus directly.
++// The sensor is subscribed only while the application is active.
++class QXcbHarmattanOrientation : public QObject
++{
++    Q_OBJECT
++public:
++    QXcbHarmattanOrientation();
++
++private Q_SLOTS:
++    void valueChanged(const QVariantList &values, qulonglong timestamp);
++    void replyFinished(QDBusPendingCallWatcher *watcher);
++    void applicationStateChanged(Qt::ApplicationState state);
++
++private:
++    void call(const QString &method);
++    void apply(const QVariantList &values);
++    bool m_subscribed = false;
++    bool m_maskSet = false;
++};
++
++QT_END_NAMESPACE
++
++#endif
+diff --git a/src/plugins/platforms/xcb/qxcbintegration.cpp b/src/plugins/platforms/xcb/qxcbintegration.cpp
+index 02d2eebb..c345230e 100644
+--- a/src/plugins/platforms/xcb/qxcbintegration.cpp
++++ b/src/plugins/platforms/xcb/qxcbintegration.cpp
+@@ -52,6 +52,9 @@
+ #include "qxcbdrag.h"
+ #endif
+ #include "qxcbglintegration.h"
++#if QT_CONFIG(dbus)
++#include "qxcbharmattanorientation.h"
++#endif
+ 
+ #ifndef QT_NO_SESSIONMANAGER
+ #include "qxcbsessionmanager.h"
+@@ -355,6 +358,10 @@ void QXcbIntegration::initialize()
+         m_inputContext.reset(QPlatformInputContextFactory::create(defaultInputContext));
+ 
+     defaultConnection()->keyboard()->initialize();
++
++#if QT_CONFIG(dbus)
++    m_harmattanOrientation.reset(new QXcbHarmattanOrientation);
++#endif
+ }
+ 
+ void QXcbIntegration::moveToScreen(QWindow *window, int screen)
+diff --git a/src/plugins/platforms/xcb/qxcbintegration.h b/src/plugins/platforms/xcb/qxcbintegration.h
+index 571726c3..cf0553e9 100644
+--- a/src/plugins/platforms/xcb/qxcbintegration.h
++++ b/src/plugins/platforms/xcb/qxcbintegration.h
+@@ -137,6 +137,9 @@ private:
+ 
+     QScopedPointer<QPlatformServices> m_services;
+ 
++    // Harmattan: QXcbHarmattanOrientation (device orientation), when D-Bus is available.
++    QScopedPointer<QObject> m_harmattanOrientation;
++
+     mutable QByteArray m_wmClass;
+     const char *m_instanceName;
+     bool m_canGrab;
+diff --git a/src/plugins/platforms/xcb/xcb_qpa_lib.pro b/src/plugins/platforms/xcb/xcb_qpa_lib.pro
+index 587bbcef..5c3f753d 100644
+--- a/src/plugins/platforms/xcb/xcb_qpa_lib.pro
++++ b/src/plugins/platforms/xcb/xcb_qpa_lib.pro
+@@ -14,6 +14,7 @@ qtHaveModule(linuxaccessibility_support-private): \
+ 
+ qtConfig(vulkan): QT += vulkan_support-private
+ 
++
+ qtConfig(glib) : QMAKE_USE_PRIVATE += glib
+ 
+ SOURCES = \
+@@ -115,3 +116,10 @@ qtConfig(dlopen): QMAKE_USE += libdl
+ clang:!intel_icc: QMAKE_CXXFLAGS += -ftemplate-depth=1024
+ 
+ load(qt_module)
++
++# Harmattan: device orientation from sensord over D-Bus (qxcbharmattanorientation.h).
++qtHaveModule(dbus) {
++    QT += dbus
++    SOURCES += qxcbharmattanorientation.cpp
++    HEADERS += qxcbharmattanorientation.h
++}

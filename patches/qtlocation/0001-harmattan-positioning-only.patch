@@ -1,0 +1,33 @@
+Harmattan: Qt Positioning only, no maps
+
+On the N9/N950 (the linux-harmattan-g++ mkspec) only Qt Positioning and its QML import are
+built: apps need positions, and the maps (Qt Location, its geoservices plugins and the
+Mapbox GL renderer) would add a large module nobody asked for. Elsewhere nothing changes.
+
+--- a/src/src.pro
++++ b/src/src.pro
+@@ -15,14 +15,20 @@
+ positioning.depends = clip2tri
+ 
+ qtHaveModule(quick) {
+-    SUBDIRS += positioningquick location
++    SUBDIRS += positioningquick
+     positioningquick.depends += positioning
+-    location.depends += positioningquick clip2tri
++    imports.depends += positioningquick positioning
+ 
+-    plugins.depends += location
++    # Nokia N9/N950: Qt Positioning and its QML import only, no maps (Qt Location).
++    !linux-harmattan-g++ {
++        SUBDIRS += location
++        location.depends += positioningquick clip2tri
++
++        plugins.depends += location
++        imports.depends += location
++    }
+ 
+     SUBDIRS += imports
+-    imports.depends += positioningquick positioning location
+ }
+ plugins.depends += positioning
+ SUBDIRS += plugins

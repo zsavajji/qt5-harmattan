@@ -1,0 +1,38 @@
+camerabin: initialize GStreamer before the first device query
+
+QCamera asks the camerabin plugin for its default device before it creates the service, and
+only create() called gst_init(): defaultDevice() looked up the source factory in an
+uninitialized GStreamer and hung for good in g_once_init_enter (N9, GLib 2.28), so any
+Camera froze the app. sourceFactory() initializes GStreamer, and devices() and
+deviceDescription() go through it too (they read the still-null factory and so listed the
+V4L2 nodes instead of the primary and secondary cameras).
+
+--- a/src/plugins/gstreamer/camerabin/camerabinserviceplugin.cpp
++++ b/src/plugins/gstreamer/camerabin/camerabinserviceplugin.cpp
+@@ -109,14 +109,14 @@
+ {
+ 
+     return service == Q_MEDIASERVICE_CAMERA
+-            ? QGstUtils::cameraDevices(m_sourceFactory)
++            ? QGstUtils::cameraDevices(sourceFactory())
+             : QList<QByteArray>();
+ }
+ 
+ QString CameraBinServicePlugin::deviceDescription(const QByteArray &service, const QByteArray &deviceName)
+ {
+     return service == Q_MEDIASERVICE_CAMERA
+-            ? QGstUtils::cameraDescription(deviceName, m_sourceFactory)
++            ? QGstUtils::cameraDescription(deviceName, sourceFactory())
+             : QString();
+ }
+ 
+@@ -141,6 +141,9 @@
+ GstElementFactory *CameraBinServicePlugin::sourceFactory() const
+ {
+     if (!m_sourceFactory) {
++        // QCamera asks for the default device before create(): GStreamer isn't initialized
++        // yet, and on the N9 (GLib 2.28) the registry lookup below hung in g_once_init_enter.
++        QGstUtils::initializeGst();
+         GstElementFactory *factory = 0;
+         const QByteArray envCandidate = qgetenv("QT_GSTREAMER_CAMERABIN_SRC");
+         if (!envCandidate.isEmpty())

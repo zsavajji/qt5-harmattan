@@ -1,0 +1,16 @@
+--- a/src/plugins/platforms/xcb/gl_integrations/xcb_egl/qxcbeglintegration.h	2026-09-26 16:05:05.217399140 +0200
++++ b/src/plugins/platforms/xcb/gl_integrations/xcb_egl/qxcbeglintegration.h	2026-09-26 16:05:05.217584999 +0200
+@@ -70,7 +70,12 @@
+     QPlatformOpenGLContext *createPlatformOpenGLContext(QOpenGLContext *context) const override;
+     QPlatformOffscreenSurface *createPlatformOffscreenSurface(QOffscreenSurface *surface) const override;
+ 
+-    bool supportsThreadedOpenGL() const override { return true; }
++    // Harmattan: the SGX driver's DRI2 path isn't safe with rendering on another thread.
++    // With Qt Quick's threaded render loop the app deadlocked within two rotations: the GUI
++    // thread blocked (futex) while the render thread waited, presumably on a DRI2 event that
++    // has to go through the GUI thread's Xlib hooks. Qt 4 rendered on the GUI thread too.
++    // Returning false makes Qt Quick use its single-threaded "basic" loop.
++    bool supportsThreadedOpenGL() const override { return false; }
+ 
+     EGLDisplay eglDisplay() const { return m_egl_display; }
+     void *xlib_display() const;

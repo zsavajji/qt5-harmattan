@@ -1,0 +1,23 @@
+Harmattan: accelerometer axes in Qt's convention
+
+The phone's sensord reports the direction of gravity: lying face up it read z = -8.8 m/s^2
+(-900 mG), where QAccelerometer reads +9.8. Sailfish's sensord was changed to Qt's
+convention; Harmattan's wasn't.
+
+--- a/src/plugins/sensors/sensorfw/sensorfwaccelerometer.cpp
++++ b/src/plugins/sensors/sensorfw/sensorfwaccelerometer.cpp
+@@ -56,9 +56,11 @@
+ {
+     // Convert from milli-Gs to meters per second per second
+     // Using 1 G = 9.80665 m/s^2
+-    m_reading.setX(data.x() * GRAVITY_EARTH_THOUSANDTH);
+-    m_reading.setY(data.y() * GRAVITY_EARTH_THOUSANDTH);
+-    m_reading.setZ(data.z() * GRAVITY_EARTH_THOUSANDTH);
++    // Harmattan: sensord reports gravity itself (-1 G on z lying face up), Qt the device's
++    // reaction to it (+9.8 face up), as QtMobility's MeeGo backend converted.
++    m_reading.setX(-data.x() * GRAVITY_EARTH_THOUSANDTH);
++    m_reading.setY(-data.y() * GRAVITY_EARTH_THOUSANDTH);
++    m_reading.setZ(-data.z() * GRAVITY_EARTH_THOUSANDTH);
+     m_reading.setTimestamp(data.XYZData().timestamp_);
+     newReadingAvailable();
+ }

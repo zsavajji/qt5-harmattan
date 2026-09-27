@@ -1,0 +1,81 @@
+--- a/src/plugins/platforms/xcb/gl_integrations/xcb_egl/qxcbeglintegration.h	2026-09-26 16:05:05.160219512 +0200
++++ b/src/plugins/platforms/xcb/gl_integrations/xcb_egl/qxcbeglintegration.h	2026-09-26 16:05:05.217399140 +0200
+@@ -54,6 +54,8 @@
+ 
+ QT_BEGIN_NAMESPACE
+ 
++class QSocketNotifier;
++
+ class QXcbEglNativeInterfaceHandler;
+ 
+ class QXcbEglIntegration : public QXcbGlIntegration
+@@ -75,6 +77,9 @@
+ private:
+     QXcbConnection *m_connection;
+     EGLDisplay m_egl_display;
++    // Harmattan: EGL's own Xlib connection, and the notifier that drains its events.
++    void *m_eglXDisplay = nullptr;
++    QSocketNotifier *m_eglXNotifier = nullptr;
+ 
+     QScopedPointer<QXcbEglNativeInterfaceHandler> m_native_interface_handler;
+ };
+--- a/src/plugins/platforms/xcb/gl_integrations/xcb_egl/qxcbeglintegration.cpp	2026-09-26 16:05:05.168219454 +0200
++++ b/src/plugins/platforms/xcb/gl_integrations/xcb_egl/qxcbeglintegration.cpp	2026-09-26 16:05:05.217486661 +0200
+@@ -42,6 +42,7 @@
+ #include "qxcbeglcontext.h"
+ 
+ #include <QtGui/QOffscreenSurface>
++#include <QtCore/QSocketNotifier>
+ #include <QtEglSupport/private/qeglstreamconvenience_p.h>
+ 
+ #include "qxcbeglnativeinterfacehandler.h"
+@@ -59,12 +60,40 @@
+ {
+     if (m_egl_display != EGL_NO_DISPLAY)
+         eglTerminate(m_egl_display);
++#if QT_CONFIG(xcb_xlib)
++    delete m_eglXNotifier;
++    if (m_eglXDisplay)
++        XCloseDisplay(static_cast<Display *>(m_eglXDisplay));
++#endif
+ }
+ 
+ bool QXcbEglIntegration::initialize(QXcbConnection *connection)
+ {
+     m_connection = connection;
+ 
++#if QT_CONFIG(xcb_xlib)
++    // Harmattan: EGL gets its own Xlib connection, whose events Xlib owns, as under Qt 4. The
++    // SGX driver waits for its DRI2 events (swap complete, buffer invalidation) by reading
++    // them through Xlib. On Qt's connection XCB owns the events, so they could only reach the
++    // driver if the GUI thread forwarded them, which it can't while it is inside
++    // eglSwapBuffers: rendering stalled for about 30 s around minimize and lock, and deadlocked
++    // with a render thread. X resources are shared, so Qt's windows work on this connection.
++    Display *qtDisplay = static_cast<Display *>(connection->xlib_display());
++    if (Display *eglDisplay = XOpenDisplay(DisplayString(qtDisplay))) {
++        m_eglXDisplay = eglDisplay;
++        // Nobody else reads this connection: drop its events once the driver's hooks have seen them.
++        m_eglXNotifier = new QSocketNotifier(ConnectionNumber(eglDisplay), QSocketNotifier::Read);
++        QObject::connect(m_eglXNotifier, &QSocketNotifier::activated, [eglDisplay] {
++            while (XPending(eglDisplay)) {
++                XEvent event;
++                XNextEvent(eglDisplay, &event);
++            }
++        });
++    } else {
++        qWarning("Could not open a separate X connection for EGL, using Qt's");
++    }
++#endif
++
+     const char *extensions = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
+ 
+     if (extensions && strstr(extensions, "EGL_EXT_platform_x11")) {
+@@ -116,7 +145,7 @@
+ void *QXcbEglIntegration::xlib_display() const
+ {
+ #if QT_CONFIG(xcb_xlib)
+-    return m_connection->xlib_display();
++    return m_eglXDisplay ? m_eglXDisplay : m_connection->xlib_display();
+ #else
+     return EGL_DEFAULT_DISPLAY;
+ #endif

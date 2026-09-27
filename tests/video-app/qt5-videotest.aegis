@@ -1,0 +1,7 @@
+<aegis>
+  <request>
+    <!-- /dev/fb2 (root:video): gltexturesink's zero-copy frames need it -->
+    <credential name="GRP::video" />
+    <for path="/opt/qt5-videotest/bin/qt5-videotest" />
+  </request>
+</aegis>

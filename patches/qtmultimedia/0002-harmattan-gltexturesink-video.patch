@@ -1,0 +1,636 @@
+Harmattan: video frames from gltexturesink without a copy
+
+QVideoSurfaceGstSink copied every DSP-decoded frame into a texture: video took 100% CPU and
+wasn't smooth. With GStreamer 0.10, QGstreamerVideoRenderer now uses Nokia's gltexturesink in
+video-texture mode (Qt Quick's EGL display and context) when the surface takes its frames,
+and the new harmattan videonode plugin binds each one (EGL images, GL_TEXTURE_EXTERNAL_OES)
+and releases it behind a fence, as Qt Mobility's QGstreamerGLTextureRenderer did. Elsewhere,
+or before VideoOutput has an OpenGL context, the copying sink stays.
+
+diff --git a/src/gsttools/qgstreamervideorenderer.cpp b/src/gsttools/qgstreamervideorenderer.cpp
+index c2226d6..5c7bccf 100644
+--- a/src/gsttools/qgstreamervideorenderer.cpp
++++ b/src/gsttools/qgstreamervideorenderer.cpp
+@@ -45,6 +45,49 @@
+ 
+ #include <gst/gst.h>
+ 
++#if !GST_CHECK_VERSION(1,0,0)
++#include <private/qgstutils_p.h>
++#include <qpa/qplatformnativeinterface.h>
++#include <QtGui/qguiapplication.h>
++#include <QtGui/qopenglcontext.h>
++#include <EGL/egl.h>   // for qeglnativecontext.h; with SUPPORT_X11 it brings Xlib's macros
++#ifdef Bool
++#  undef Bool
++#endif
++#ifdef None
++#  undef None
++#endif
++#include <QtPlatformHeaders/qeglnativecontext.h>
++#include <qvideosurfaceformat.h>
++#include <unistd.h>
++
++// Harmattan (N9): Nokia's gltexturesink hands the DSP-decoded frames over as EGL images, which
++// the "harmattan" videonode plugin binds to a GL_TEXTURE_EXTERNAL_OES texture: no copy of the
++// frames, which QVideoSurfaceGstSink made into textures at full CPU. A frame's handle is
++// [sink, frame number]; the handle type must match the plugin's.
++static const QAbstractVideoBuffer::HandleType HarmattanTextureHandle =
++        QAbstractVideoBuffer::HandleType(QAbstractVideoBuffer::UserHandle + 0x4e39);
++
++class QHarmattanTextureBuffer : public QAbstractVideoBuffer
++{
++public:
++    QHarmattanTextureBuffer(GstElement *sink, int frame)
++        : QAbstractVideoBuffer(HarmattanTextureHandle), m_sink(sink), m_frame(frame) {}
++
++    MapMode mapMode() const override { return NotMapped; }
++    uchar *map(MapMode, int *, int *) override { return nullptr; }
++    void unmap() override {}
++    QVariant handle() const override
++    {
++        return QVariantList() << QVariant::fromValue<void *>(m_sink) << m_frame;
++    }
++
++private:
++    GstElement *m_sink;
++    int m_frame;
++};
++#endif
++
+ static inline void resetSink(GstElement *&element, GstElement *v = nullptr)
+ {
+     if (element)
+@@ -78,13 +121,102 @@ void QGstreamerVideoRenderer::setVideoSink(GstElement *sink)
+ GstElement *QGstreamerVideoRenderer::videoSink()
+ {
+     if (!m_videoSink && m_surface) {
+-        auto sink = reinterpret_cast<GstElement *>(QVideoSurfaceGstSink::createSink(m_surface));
++        GstElement *sink = nullptr;
++#if !GST_CHECK_VERSION(1,0,0)
++        sink = createTextureSink();
++        m_textureSink = sink;
++#endif
++        if (!sink)
++            sink = reinterpret_cast<GstElement *>(QVideoSurfaceGstSink::createSink(m_surface));
+         resetSink(m_videoSink, sink);
+     }
+ 
+     return m_videoSink;
+ }
+ 
++#if !GST_CHECK_VERSION(1,0,0)
++GstElement *QGstreamerVideoRenderer::createTextureSink()
++{
++    // The surface takes these frames only with the videonode plugin, and gives its OpenGL
++    // context once VideoOutput has rendered (eventFilter() then switches sinks). The sink hands
++    // frames over only from the overlay framebuffer's memory (the DSP decodes into it), which is
++    // root:video: apps get it with Aegis' GRP::video, others keep the copying sink.
++    if (m_surface->supportedPixelFormats(HarmattanTextureHandle).isEmpty()
++            || access("/dev/fb2", R_OK | W_OK) != 0)
++        return nullptr;
++    auto *context = qobject_cast<QOpenGLContext *>(m_surface->property("GLContext").value<QObject *>());
++    if (!context || !context->nativeHandle().canConvert<QEGLNativeContext>())
++        return nullptr;
++    const auto egl = context->nativeHandle().value<QEGLNativeContext>();
++    // Qt's own Xlib display: the xcb plugin calls XInitThreads(), and the sink uses it from the
++    // streaming thread.
++    void *display = QGuiApplication::platformNativeInterface()->nativeResourceForIntegration("display");
++    if (!display)
++        return nullptr;
++    GstElement *sink = gst_element_factory_make("gltexturesink", nullptr);
++    if (!sink)
++        return nullptr;
++    g_object_set(G_OBJECT(sink),
++                 "x-display", display,
++                 "egl-display", egl.display(),
++                 "egl-context", egl.context(),
++                 "render-mode", "video-texture",
++                 "use-framebuffer-memory", TRUE,
++                 nullptr);
++    g_signal_connect(G_OBJECT(sink), "frame-ready", G_CALLBACK(handleFrameReady), this);
++    return sink;
++}
++
++// The sink's streaming thread: present the frame on the GUI thread, and wait until it has been,
++// as Qt Mobility did: at most 60 ms (1-2 frames), so a busy or stopping GUI thread drops frames
++// instead of deadlocking.
++void QGstreamerVideoRenderer::handleFrameReady(GstElement *, gint frame, gpointer data)
++{
++    auto *self = static_cast<QGstreamerVideoRenderer *>(data);
++    QMutexLocker locker(&self->m_mutex);
++    QMetaObject::invokeMethod(self, "presentTextureFrame", Qt::QueuedConnection, Q_ARG(int, frame));
++    self->m_presented.wait(&self->m_mutex, 60);
++}
++
++void QGstreamerVideoRenderer::presentTextureFrame(int frame)
++{
++    QMutexLocker locker(&m_mutex);
++    if (m_surface && m_videoSink && m_textureSink) {
++        if (m_surface->isActive() && m_surface->surfaceFormat().handleType() != HarmattanTextureHandle)
++            m_surface->stop();
++        if (!m_surface->isActive()) {
++            QSize size;
++            GstPad *pad = gst_element_get_static_pad(m_videoSink, "sink");
++            if (GstCaps *caps = gst_pad_get_negotiated_caps(pad)) {
++                size = QGstUtils::capsCorrectedResolution(caps);
++                gst_caps_unref(caps);
++            }
++            gst_object_unref(GST_OBJECT(pad));
++            m_surface->start(QVideoSurfaceFormat(size, QVideoFrame::Format_RGB32, HarmattanTextureHandle));
++        }
++        if (m_surface->isActive()) {
++            m_surface->present(QVideoFrame(new QHarmattanTextureBuffer(m_videoSink, frame),
++                                           m_surface->surfaceFormat().frameSize(),
++                                           QVideoFrame::Format_RGB32));
++        }
++    }
++    m_presented.wakeAll();
++}
++
++// VideoOutput gives the surface its OpenGL context after its first rendering, which can be after
++// the pipeline has its sink: then switch to the texture sink.
++bool QGstreamerVideoRenderer::eventFilter(QObject *watched, QEvent *event)
++{
++    if (watched == m_surface && event->type() == QEvent::DynamicPropertyChange
++            && static_cast<QDynamicPropertyChangeEvent *>(event)->propertyName() == "GLContext"
++            && m_videoSink && !m_textureSink) {
++        resetSink(m_videoSink);
++        emit sinkChanged();
++    }
++    return false;
++}
++#endif
++
+ void QGstreamerVideoRenderer::stopRenderer()
+ {
+     if (m_surface)
+@@ -104,6 +236,9 @@ void QGstreamerVideoRenderer::setSurface(QAbstractVideoSurface *surface)
+         if (m_surface) {
+             disconnect(m_surface.data(), SIGNAL(supportedFormatsChanged()),
+                        this, SLOT(handleFormatChange()));
++#if !GST_CHECK_VERSION(1,0,0)
++            m_surface->removeEventFilter(this);
++#endif
+         }
+ 
+         bool wasReady = isReady();
+@@ -113,6 +248,9 @@ void QGstreamerVideoRenderer::setSurface(QAbstractVideoSurface *surface)
+         if (m_surface) {
+             connect(m_surface.data(), SIGNAL(supportedFormatsChanged()),
+                     this, SLOT(handleFormatChange()));
++#if !GST_CHECK_VERSION(1,0,0)
++            m_surface->installEventFilter(this);
++#endif
+         }
+ 
+         if (wasReady != isReady())
+diff --git a/src/gsttools/qgstreamervideorenderer_p.h b/src/gsttools/qgstreamervideorenderer_p.h
+index d87bfcb..5e811f9 100644
+--- a/src/gsttools/qgstreamervideorenderer_p.h
++++ b/src/gsttools/qgstreamervideorenderer_p.h
+@@ -58,6 +58,9 @@
+ 
+ #include "qgstreamervideorendererinterface_p.h"
+ 
++#include <QtCore/qmutex.h>
++#include <QtCore/qwaitcondition.h>
++
+ QT_BEGIN_NAMESPACE
+ 
+ class Q_GSTTOOLS_EXPORT QGstreamerVideoRenderer : public QVideoRendererControl, public QGstreamerVideoRendererInterface
+@@ -83,8 +86,20 @@ signals:
+ 
+ private slots:
+     void handleFormatChange();
++#if !GST_CHECK_VERSION(1,0,0)
++    void presentTextureFrame(int frame);
++#endif
+ 
+ private:
++#if !GST_CHECK_VERSION(1,0,0)
++    bool eventFilter(QObject *watched, QEvent *event) override;
++    GstElement *createTextureSink();
++    static void handleFrameReady(GstElement *sink, gint frame, gpointer data);
++
++    bool m_textureSink = false;
++    QMutex m_mutex;
++    QWaitCondition m_presented;
++#endif
+     GstElement *m_videoSink = nullptr;
+     QPointer<QAbstractVideoSurface> m_surface;
+ };
+diff --git a/src/plugins/videonode/harmattan/harmattan.json b/src/plugins/videonode/harmattan/harmattan.json
+new file mode 100644
+index 0000000..89ea7f5
+--- /dev/null
++++ b/src/plugins/videonode/harmattan/harmattan.json
+@@ -0,0 +1,3 @@
++{
++    "Keys": ["harmattan"]
++}
+diff --git a/src/plugins/videonode/harmattan/harmattan.pro b/src/plugins/videonode/harmattan/harmattan.pro
+new file mode 100644
+index 0000000..2efebcb
+--- /dev/null
++++ b/src/plugins/videonode/harmattan/harmattan.pro
+@@ -0,0 +1,19 @@
++TARGET = harmattanvideonode
++
++QT += multimedia-private qtmultimediaquicktools-private
++CONFIG += egl
++LIBS += -ldl
++
++HEADERS += \
++    qsgvideonode_harmattan.h
++
++SOURCES += \
++    qsgvideonode_harmattan.cpp
++
++OTHER_FILES += \
++    harmattan.json
++
++PLUGIN_TYPE = video/videonode
++PLUGIN_EXTENDS = quick
++PLUGIN_CLASS_NAME = QSGVideoNodeFactory_Harmattan
++load(qt_plugin)
+diff --git a/src/plugins/videonode/harmattan/qsgvideonode_harmattan.cpp b/src/plugins/videonode/harmattan/qsgvideonode_harmattan.cpp
+new file mode 100644
+index 0000000..a2763ce
+--- /dev/null
++++ b/src/plugins/videonode/harmattan/qsgvideonode_harmattan.cpp
+@@ -0,0 +1,282 @@
++/****************************************************************************
++**
++** Copyright (C) 2026 Andrea Faggin
++**
++** Harmattan (N9) video frames from Nokia's gltexturesink, drawn without a copy.
++** Based on the egl videonode plugin: Copyright (C) 2016 The Qt Company Ltd.
++**
++** This file may be used under the terms of the GNU Lesser General Public License version 3,
++** or the GNU General Public License version 2 or 3, as the Qt Multimedia module it belongs to.
++**
++****************************************************************************/
++
++// gltexturesink (the phone's GStreamer 0.10, used by gsttools' QGstreamerVideoRenderer) keeps
++// the DSP-decoded frames as EGL images. A frame's handle is [sink, frame number]. As Qt Mobility's
++// QGstreamerGLTextureRenderer did, each rendering pass has the sink bind the frame to our
++// GL_TEXTURE_EXTERNAL_OES texture just before drawing, and gives it back behind a fence right
++// after (QQuickWindow::afterRendering): the sink produces the next frame only once it has the
++// previous one back, so holding a frame until the next one stalled playback. The interface
++// library has no headers in the SDK and isn't on every system, so it is loaded at run time.
++
++// Qt's headers before the EGL ones in ours, which bring Xlib's macros (KeyPress, None...).
++#include <QtGui/qopenglcontext.h>
++#include <QtMultimedia/qvideosurfaceformat.h>
++#include <QtQuick/qquickwindow.h>
++
++#include "qsgvideonode_harmattan.h"
++
++#include <GLES2/gl2ext.h>
++#include <dlfcn.h>
++
++QT_BEGIN_NAMESPACE
++
++// EGL_KHR_fence_sync: the SGX driver has it, the SDK's eglext.h (2011) doesn't declare it.
++#ifndef EGL_SYNC_FENCE_KHR
++#define EGL_SYNC_FENCE_KHR 0x30F9
++#endif
++typedef void *(*CreateSyncKHR)(EGLDisplay display, EGLenum type, const EGLint *attributes);
++
++static const QAbstractVideoBuffer::HandleType HarmattanTextureHandle =   // as in gsttools
++        QAbstractVideoBuffer::HandleType(QAbstractVideoBuffer::UserHandle + 0x4e39);
++
++namespace {
++struct VideoTexture // libgstmeegointerfaces-0.10: MeegoGstVideoTexture, and GObject references
++{
++    int (*acquireFrame)(void *sink, int frame) = nullptr;
++    int (*bindFrame)(void *sink, int target, int frame) = nullptr;
++    void (*releaseFrame)(void *sink, int frame, void *sync) = nullptr;
++    void *(*ref)(void *object) = nullptr;
++    void (*unref)(void *object) = nullptr;
++    CreateSyncKHR createSync = nullptr;
++    bool ok = false;
++};
++}
++
++static const VideoTexture &videoTexture()
++{
++    static const VideoTexture api = [] {
++        VideoTexture a;
++        void *meego = dlopen("libgstmeegointerfaces-0.10.so.0", RTLD_NOW | RTLD_GLOBAL);
++        void *gobject = dlopen("libgobject-2.0.so.0", RTLD_NOW | RTLD_GLOBAL);
++        if (meego && gobject) {
++            a.acquireFrame = reinterpret_cast<decltype(a.acquireFrame)>(dlsym(meego, "meego_gst_video_texture_acquire_frame"));
++            a.bindFrame = reinterpret_cast<decltype(a.bindFrame)>(dlsym(meego, "meego_gst_video_texture_bind_frame"));
++            a.releaseFrame = reinterpret_cast<decltype(a.releaseFrame)>(dlsym(meego, "meego_gst_video_texture_release_frame"));
++            a.ref = reinterpret_cast<decltype(a.ref)>(dlsym(gobject, "g_object_ref"));
++            a.unref = reinterpret_cast<decltype(a.unref)>(dlsym(gobject, "g_object_unref"));
++        }
++        a.createSync = reinterpret_cast<CreateSyncKHR>(eglGetProcAddress("eglCreateSyncKHR"));
++        a.ok = a.acquireFrame && a.bindFrame && a.releaseFrame && a.ref && a.unref && a.createSync;
++        return a;
++    }();
++    return api;
++}
++
++namespace {
++struct BoundFrame { void *sink; int frame; GLuint texture; };
++}
++static QVector<BoundFrame> boundFrames;   // this rendering pass's, in the rendering thread
++
++static void releaseBoundFrames()
++{
++    const VideoTexture &api = videoTexture();
++    // The sink waits on the fence before reusing a frame's buffer: the GPU may still be
++    // drawing it. Without a current context (destruction) there is none to wait for.
++    EGLDisplay display = eglGetCurrentDisplay();
++    for (const BoundFrame &b : qAsConst(boundFrames)) {
++        glBindTexture(GL_TEXTURE_EXTERNAL_OES, b.texture);
++        api.bindFrame(b.sink, GL_TEXTURE_EXTERNAL_OES, -1);
++        void *sync = display != EGL_NO_DISPLAY ? api.createSync(display, EGL_SYNC_FENCE_KHR, nullptr) : nullptr;
++        api.releaseFrame(b.sink, b.frame, sync);
++        api.unref(b.sink);
++    }
++    boundFrames.clear();
++}
++
++// Frames go back after each rendering pass of the window being rendered.
++static void releaseAfterRendering()
++{
++    QOpenGLContext *context = QOpenGLContext::currentContext();
++    QSurface *surface = context ? context->surface() : nullptr;
++    if (!surface || surface->surfaceClass() != QSurface::Window)
++        return;
++    auto *window = qobject_cast<QQuickWindow *>(static_cast<QWindow *>(surface));
++    if (window && !window->property("_q_harmattanVideo").toBool()) {
++        window->setProperty("_q_harmattanVideo", true);
++        QObject::connect(window, &QQuickWindow::afterRendering, releaseBoundFrames); // direct
++    }
++}
++
++class QSGVideoMaterial_HarmattanShader : public QSGMaterialShader
++{
++public:
++    void updateState(const RenderState &state, QSGMaterial *newEffect, QSGMaterial *oldEffect) override;
++    char const *const *attributeNames() const override;
++
++    static QSGMaterialType type;
++
++protected:
++    void initialize() override;
++    const char *vertexShader() const override;
++    const char *fragmentShader() const override;
++
++private:
++    int id_matrix;
++    int id_opacity;
++    int id_texture;
++};
++
++QSGMaterialType QSGVideoMaterial_HarmattanShader::type;
++
++void QSGVideoMaterial_HarmattanShader::updateState(
++        const RenderState &state, QSGMaterial *newEffect, QSGMaterial *oldEffect)
++{
++    auto *material = static_cast<QSGVideoMaterial_Harmattan *>(newEffect);
++    if (!oldEffect)
++        program()->setUniformValue(id_texture, 0);
++    if (state.isMatrixDirty())
++        program()->setUniformValue(id_matrix, state.combinedMatrix());
++    if (state.isOpacityDirty())
++        program()->setUniformValue(id_opacity, state.opacity());
++
++    glActiveTexture(GL_TEXTURE0);
++    material->bindFrame();
++}
++
++char const *const *QSGVideoMaterial_HarmattanShader::attributeNames() const
++{
++    static char const *const attr[] = { "position", "texcoord", nullptr };
++    return attr;
++}
++
++void QSGVideoMaterial_HarmattanShader::initialize()
++{
++    id_matrix = program()->uniformLocation("matrix");
++    id_opacity = program()->uniformLocation("opacity");
++    id_texture = program()->uniformLocation("texture");
++}
++
++const char *QSGVideoMaterial_HarmattanShader::vertexShader() const
++{
++    return  "\n uniform highp mat4 matrix;"
++            "\n attribute highp vec4 position;"
++            "\n attribute highp vec2 texcoord;"
++            "\n varying highp vec2 frag_tx;"
++            "\n void main(void)"
++            "\n {"
++            "\n     gl_Position = matrix * position;"
++            "\n     frag_tx = texcoord;"
++            "\n }";
++}
++
++const char *QSGVideoMaterial_HarmattanShader::fragmentShader() const
++{
++    return  "\n #extension GL_OES_EGL_image_external : require"
++            "\n uniform samplerExternalOES texture;"
++            "\n uniform lowp float opacity;"
++            "\n varying highp vec2 frag_tx;"
++            "\n void main(void)"
++            "\n {"
++            "\n     gl_FragColor = texture2D(texture, frag_tx.st) * opacity;"
++            "\n }";
++}
++
++QSGVideoMaterial_Harmattan::~QSGVideoMaterial_Harmattan()
++{
++    setFrame(nullptr, -1);
++    if (m_textureId)
++        glDeleteTextures(1, &m_textureId);
++}
++
++QSGMaterialShader *QSGVideoMaterial_Harmattan::createShader() const
++{
++    return new QSGVideoMaterial_HarmattanShader;
++}
++
++QSGMaterialType *QSGVideoMaterial_Harmattan::type() const
++{
++    return &QSGVideoMaterial_HarmattanShader::type;
++}
++
++int QSGVideoMaterial_Harmattan::compare(const QSGMaterial *other) const
++{
++    return m_textureId - static_cast<const QSGVideoMaterial_Harmattan *>(other)->m_textureId;
++}
++
++// While syncing: the frame the next rendering passes draw.
++void QSGVideoMaterial_Harmattan::setFrame(void *sink, int frame)
++{
++    const VideoTexture &api = videoTexture();
++    if (sink)
++        api.ref(sink);
++    if (m_sink)
++        api.unref(m_sink);
++    m_sink = sink;
++    m_frame = frame;
++}
++
++// While rendering, just before drawing: given back after this pass (releaseBoundFrames()). A
++// repaint without a new frame binds the same one again; one the sink has reused in the
++// meantime can't be acquired, and the texture stays empty until the next frame.
++void QSGVideoMaterial_Harmattan::bindFrame()
++{
++    if (!m_textureId) {
++        glGenTextures(1, &m_textureId);
++        glBindTexture(GL_TEXTURE_EXTERNAL_OES, m_textureId);
++        glTexParameterf(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++        glTexParameterf(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++    }
++    glBindTexture(GL_TEXTURE_EXTERNAL_OES, m_textureId);
++    for (const BoundFrame &b : qAsConst(boundFrames)) {
++        if (b.texture == m_textureId)
++            return;   // already bound in this pass
++    }
++    const VideoTexture &api = videoTexture();
++    if (m_sink && api.acquireFrame(m_sink, m_frame) && api.bindFrame(m_sink, GL_TEXTURE_EXTERNAL_OES, m_frame)) {
++        boundFrames.append({ api.ref(m_sink), m_frame, m_textureId });
++        releaseAfterRendering();
++    }
++}
++
++QSGVideoNode_Harmattan::QSGVideoNode_Harmattan(const QVideoSurfaceFormat &format)
++    : m_pixelFormat(format.pixelFormat())
++{
++    setMaterial(&m_material);
++}
++
++void QSGVideoNode_Harmattan::setCurrentFrame(const QVideoFrame &frame, FrameFlags)
++{
++    const QVariantList handle = frame.handle().toList();
++    if (handle.size() == 2)
++        m_material.setFrame(handle.at(0).value<void *>(), handle.at(1).toInt());
++    markDirty(DirtyMaterial);
++}
++
++QVideoFrame::PixelFormat QSGVideoNode_Harmattan::pixelFormat() const
++{
++    return m_pixelFormat;
++}
++
++QAbstractVideoBuffer::HandleType QSGVideoNode_Harmattan::handleType() const
++{
++    return HarmattanTextureHandle;
++}
++
++QList<QVideoFrame::PixelFormat> QSGVideoNodeFactory_Harmattan::supportedPixelFormats(
++        QAbstractVideoBuffer::HandleType handleType) const
++{
++    if (handleType != HarmattanTextureHandle || !videoTexture().ok)
++        return QList<QVideoFrame::PixelFormat>();
++    return QList<QVideoFrame::PixelFormat>() << QVideoFrame::Format_RGB32;
++}
++
++QSGVideoNode *QSGVideoNodeFactory_Harmattan::createNode(const QVideoSurfaceFormat &format)
++{
++    return format.handleType() == HarmattanTextureHandle && videoTexture().ok
++            ? new QSGVideoNode_Harmattan(format)
++            : nullptr;
++}
++
++QT_END_NAMESPACE
+diff --git a/src/plugins/videonode/harmattan/qsgvideonode_harmattan.h b/src/plugins/videonode/harmattan/qsgvideonode_harmattan.h
+new file mode 100644
+index 0000000..5980043
+--- /dev/null
++++ b/src/plugins/videonode/harmattan/qsgvideonode_harmattan.h
+@@ -0,0 +1,76 @@
++/****************************************************************************
++**
++** Copyright (C) 2026 Andrea Faggin
++**
++** Harmattan (N9) video frames from Nokia's gltexturesink, drawn without a copy.
++** Based on the egl videonode plugin: Copyright (C) 2016 The Qt Company Ltd.
++**
++** This file may be used under the terms of the GNU Lesser General Public License version 3,
++** or the GNU General Public License version 2 or 3, as the Qt Multimedia module it belongs to.
++**
++****************************************************************************/
++
++#ifndef HARMATTANVIDEONODE_H
++#define HARMATTANVIDEONODE_H
++
++#include <private/qsgvideonode_p.h>
++
++#include <QSGMaterial>
++
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++
++#ifdef Bool
++#  undef Bool
++#endif
++#ifdef None
++#  undef None
++#endif
++
++QT_BEGIN_NAMESPACE
++
++class QSGVideoMaterial_Harmattan : public QSGMaterial
++{
++public:
++    ~QSGVideoMaterial_Harmattan();
++
++    QSGMaterialShader *createShader() const override;
++    QSGMaterialType *type() const override;
++    int compare(const QSGMaterial *other) const override;
++
++    void setFrame(void *sink, int frame);
++    void bindFrame();
++
++private:
++    void *m_sink = nullptr;
++    int m_frame = -1;
++    GLuint m_textureId = 0;
++};
++
++class QSGVideoNode_Harmattan : public QSGVideoNode
++{
++public:
++    QSGVideoNode_Harmattan(const QVideoSurfaceFormat &format);
++
++    void setCurrentFrame(const QVideoFrame &frame, FrameFlags flags) override;
++    QVideoFrame::PixelFormat pixelFormat() const override;
++    QAbstractVideoBuffer::HandleType handleType() const override;
++
++private:
++    QSGVideoMaterial_Harmattan m_material;
++    QVideoFrame::PixelFormat m_pixelFormat;
++};
++
++class QSGVideoNodeFactory_Harmattan : public QSGVideoNodeFactoryPlugin
++{
++    Q_OBJECT
++    Q_PLUGIN_METADATA(IID "org.qt-project.qt.sgvideonodefactory/5.2" FILE "harmattan.json")
++public:
++    QList<QVideoFrame::PixelFormat> supportedPixelFormats(
++            QAbstractVideoBuffer::HandleType handleType) const override;
++    QSGVideoNode *createNode(const QVideoSurfaceFormat &format) override;
++};
++
++QT_END_NAMESPACE
++
++#endif
+diff --git a/src/plugins/videonode/videonode.pro b/src/plugins/videonode/videonode.pro
+index 889862c..8870670 100644
+--- a/src/plugins/videonode/videonode.pro
++++ b/src/plugins/videonode/videonode.pro
+@@ -6,3 +6,5 @@ qtConfig(gpu_vivante):qtConfig(gstreamer) {
+ }
+ 
+ qtConfig(egl):qtConfig(opengles2):!android: SUBDIRS += egl
++# Harmattan (N9): frames from Nokia's gltexturesink, with gsttools' GStreamer 0.10 renderer.
++qtConfig(egl):qtConfig(opengles2):qtConfig(gstreamer_0_10): SUBDIRS += harmattan

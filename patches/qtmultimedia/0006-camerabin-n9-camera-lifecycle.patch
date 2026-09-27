@@ -1,0 +1,175 @@
+camerabin: the N9 camera's lifecycle (reload, stop and start, switching cameras)
+
+Nokia's camera source needs, with GStreamer 0.10:
+- To NULL out of READY through PAUSED, unless a start was asked for since the load:
+  subdevsrc2 creates libomap3camd on a task it starts in READY and deletes it on the way to
+  NULL only if it's there; leaving READY during the creation leaked it with its lock file, and
+  every later READY retried "libomap3camd is still in use" (StartingStatus forever). PAUSED
+  waits for the library. The viewfinder gives its frames back first (stopRenderer()).
+- always-copy on subdevsrc2: it lends its driver buffers and waits for all of them on the way
+  down; Qt keeps frames only the busy GUI thread releases, so a reload while streaming hung.
+- A reload after stop(): READY to PAUSED a second time left the camera in StartingStatus, or
+  gltexturesink divided by zero (SIGFPE).
+- unload() stops first and goes on at LoadedStatus, once the event loop has handled the stop:
+  straight from PLAYING to NULL, a switch between cameras sometimes failed to start the next
+  one ("Could not map buffers from device") and left the source's pool mutex locked, so the
+  next state change hung. Checked with tests/camera-app/sequence.qml (loop=N).
+
+--- a/src/plugins/gstreamer/camerabin/camerabinsession.cpp
++++ b/src/plugins/gstreamer/camerabin/camerabinsession.cpp
+@@ -205,7 +205,7 @@
+         if (m_viewfinderInterface)
+             m_viewfinderInterface->stopRenderer();
+ 
+-        gst_element_set_state(m_camerabin, GST_STATE_NULL);
++        setNullState();
+         gst_element_get_state(m_camerabin, NULL, NULL, GST_CLOCK_TIME_NONE);
+         gst_object_unref(GST_OBJECT(m_bus));
+         gst_object_unref(GST_OBJECT(m_camerabin));
+@@ -297,7 +297,7 @@
+ 
+         g_object_set(G_OBJECT(m_viewfinderElement), "sync", FALSE, NULL);
+         qt_gst_object_ref_sink(GST_OBJECT(m_viewfinderElement));
+-        gst_element_set_state(m_camerabin, GST_STATE_NULL);
++        setNullState();
+         g_object_set(G_OBJECT(m_camerabin), VIEWFINDER_SINK_PROPERTY, m_viewfinderElement, NULL);
+     }
+ 
+@@ -336,6 +336,41 @@
+     return caps;
+ }
+ 
++// Takes camerabin to NULL. GStreamer 0.10 (the N9): subdevsrc2 creates Nokia's libomap3camd on
++// a task it starts in READY, and on the way to NULL deletes the library only if it is already
++// there: leaving READY during the creation leaked it, still holding its lock file, and the next
++// READY retried "libomap3camd is still in use" forever (the camera hung in StartingStatus).
++// Out of READY the pipeline passes PAUSED first: subdevsrc2 configures there, which waits for
++// the library. The bus is flushed meanwhile, as that PAUSED is not a state for the session.
++// Not once start() has asked for PLAYING: the library is there then, and a second PAUSED hung
++// in the source (after stop(), or after it failed to start).
++void CameraBinSession::setNullState()
++{
++    // The viewfinder gives its frames back first: Nokia's camera source lends its driver
++    // buffers and, on the way down, waits for all of them; VideoOutput kept the last one (only
++    // the GUI thread, busy here, lets go of it), so a reload while streaming hung. unload()
++    // already did this; the sink restarts the surface with the next caps.
++    if (m_viewfinderInterface)
++        m_viewfinderInterface->stopRenderer();
++#if !GST_CHECK_VERSION(1,0,0)
++    GstState state = GST_STATE_NULL;
++    gst_element_get_state(m_camerabin, &state, nullptr, 0);
++    const bool started = m_started;
++    m_started = false;
++    if (state == GST_STATE_READY && !started) {
++        GstBus *bus = gst_element_get_bus(m_camerabin);
++        gst_bus_set_flushing(bus, TRUE);
++        if (gst_element_set_state(m_camerabin, GST_STATE_PAUSED) == GST_STATE_CHANGE_ASYNC)
++            gst_element_get_state(m_camerabin, nullptr, nullptr, 5 * GST_SECOND);
++        gst_element_set_state(m_camerabin, GST_STATE_NULL);
++        gst_bus_set_flushing(bus, FALSE);
++        gst_object_unref(bus);
++        return;
++    }
++#endif
++    gst_element_set_state(m_camerabin, GST_STATE_NULL);
++}
++
+ // Sets a capture caps property of camerabin, unless it holds these caps already. GStreamer 0.10
+ // (Nokia's camerabin2 on the N9): once one was set in READY, the next PLAYING deadlocked in the
+ // camera source. A change outside NULL is only noted there: load() applies it before READY.
+@@ -596,6 +631,14 @@
+ 
+                 if (m_videoSrc)
+                     g_object_set(G_OBJECT(m_cameraSrc), "video-source", m_videoSrc, NULL);
++#if !GST_CHECK_VERSION(1,0,0)
++                // Nokia's subdevsrc2 (the N9) lends its driver buffers downstream and, on the
++                // way to NULL, waits until every one is back; Qt keeps frames (VideoOutput, the
++                // viewfinder probe) that only the GUI thread lets go of, and a reload while
++                // streaming hung there. Copies stay with Qt, the driver buffers in the source.
++                if (m_videoSrc && g_object_class_find_property(G_OBJECT_GET_CLASS(m_videoSrc), "always-copy"))
++                    g_object_set(G_OBJECT(m_videoSrc), "always-copy", TRUE, NULL);
++#endif
+             }
+ 
+             if (m_videoSrc) {
+@@ -895,7 +938,7 @@
+ 
+     setStatus(QCamera::LoadingStatus);
+ 
+-    gst_element_set_state(m_camerabin, GST_STATE_NULL);
++    setNullState();
+ 
+     if (!setupCameraBin()) {
+         setError(QCamera::CameraError, QStringLiteral("No camera source available"));
+@@ -929,6 +972,19 @@
+ {
+     if (m_status == QCamera::UnloadedStatus || m_status == QCamera::UnloadingStatus)
+         return;
++#if !GST_CHECK_VERSION(1,0,0)
++    // Nokia's camera source (the N9) is stopped first, and the unload (or, after a switch
++    // between cameras, the reload) goes on at LoadedStatus (setStatus()), after the event loop
++    // has handled the frames and messages of the stop: straight from PLAYING to NULL, the next
++    // camera sometimes failed to start ("Could not map buffers from device") and left the
++    // source's pool locked, so the next state change hung.
++    if (m_status == QCamera::ActiveStatus) {
++        stop();
++        return;
++    }
++    if (m_status == QCamera::StoppingStatus)
++        return;
++#endif
+ 
+     setStatus(QCamera::UnloadingStatus);
+ 
+@@ -938,7 +994,7 @@
+     if (m_viewfinderInterface)
+         m_viewfinderInterface->stopRenderer();
+ 
+-    gst_element_set_state(m_camerabin, GST_STATE_NULL);
++    setNullState();
+ 
+     if (m_busy)
+         emit busyChanged(m_busy = false);
+@@ -961,10 +1017,11 @@
+ 
+ #if !GST_CHECK_VERSION(1,0,0)
+     if (m_reloadBeforeStart) {
+-        // Settings changed since load(): reload with the new caps, then start (setStatus()).
++        // Settings changed since load(), or stop(): reload, then start (setStatus()).
+         load();
+         return;
+     }
++    m_started = true;
+ #endif
+ 
+     gst_element_set_state(m_camerabin, GST_STATE_PLAYING);
+@@ -984,6 +1041,11 @@
+         m_viewfinderInterface->stopRenderer();
+ 
+     gst_element_set_state(m_camerabin, GST_STATE_READY);
++#if !GST_CHECK_VERSION(1,0,0)
++    // Nokia's camera source (the N9) doesn't leave READY for PAUSED twice: the camera stayed in
++    // StartingStatus, or gltexturesink divided by zero (SIGFPE). The next start() reloads.
++    m_reloadBeforeStart = true;
++#endif
+ }
+ 
+ bool CameraBinSession::isBusy() const
+--- a/src/plugins/gstreamer/camerabin/camerabinsession.h
++++ b/src/plugins/gstreamer/camerabin/camerabinsession.h
+@@ -199,6 +199,7 @@
+ 
+     void setStatus(QCamera::Status status);
+     void setCaptureCaps(const char *property, GstCaps *caps);
++    void setNullState();
+     void setStateHelper(QCamera::State state);
+     void setError(int error, const QString &errorString);
+ 
+@@ -262,6 +263,7 @@
+     bool m_inputDeviceHasChanged;
+     bool m_usingWrapperCameraBinSrc;
+     bool m_reloadBeforeStart;
++    bool m_started = false; // PLAYING asked for since the last NULL (GStreamer 0.10)
+ 
+     class ViewfinderProbe : public QGstreamerVideoProbeControl {
+     public:

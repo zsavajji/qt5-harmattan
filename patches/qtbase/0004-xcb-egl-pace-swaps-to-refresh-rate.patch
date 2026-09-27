@@ -1,0 +1,48 @@
+diff --git a/src/plugins/platforms/xcb/gl_integrations/xcb_egl/qxcbeglcontext.h b/src/plugins/platforms/xcb/gl_integrations/xcb_egl/qxcbeglcontext.h
+index fda53f17..ea346581 100644
+--- a/src/plugins/platforms/xcb/gl_integrations/xcb_egl/qxcbeglcontext.h
++++ b/src/plugins/platforms/xcb/gl_integrations/xcb_egl/qxcbeglcontext.h
+@@ -44,6 +44,9 @@
+ #include <QtEglSupport/private/qeglplatformcontext_p.h>
+ #include <QtEglSupport/private/qeglpbuffer_p.h>
+ #include <QtPlatformHeaders/QEGLNativeContext>
++#include <QtCore/QElapsedTimer>
++#include <QtCore/QThread>
++#include "qxcbscreen.h"
+ 
+ QT_BEGIN_NAMESPACE
+ 
+@@ -61,6 +64,7 @@ public:
+         QEGLPlatformContext::swapBuffers(surface);
+         if (surface->surface()->surfaceClass() == QSurface::Window) {
+             QXcbWindow *platformWindow = static_cast<QXcbWindow *>(surface);
++            paceSwap(platformWindow->xcbScreen() ? platformWindow->xcbScreen()->refreshRate() : 60);
+             // OpenGL context might be bound to a non-gui thread use QueuedConnection to sync
+             // the window from the platformWindow's thread as QXcbWindow is no QObject, an
+             // event is sent to QXcbConnection. (this is faster than a metacall)
+@@ -90,6 +94,25 @@ public:
+     QVariant nativeHandle() const {
+         return QVariant::fromValue<QEGLNativeContext>(QEGLNativeContext(eglContext(), eglDisplay()));
+     }
++
++private:
++    // Harmattan: the SGX driver ignores eglSwapInterval, and a fullscreen window without
++    // decorations, which mcompositor doesn't composite, swaps without waiting for vsync: Qt
++    // Quick then renders ~120 fps for a 60 Hz panel. So swaps are paced to the refresh rate
++    // here; when the compositor already throttles, the wait comes out as zero. This removes
++    // the wasted frames, not tearing: true vsync would need /dev/fb0, which apps can't open.
++    void paceSwap(qreal refreshRate)
++    {
++        const qint64 intervalNs = qint64(1e9 / (refreshRate > 0 ? refreshRate : 60));
++        if (m_lastSwap.isValid()) {
++            const qint64 left = intervalNs - m_lastSwap.nsecsElapsed();
++            if (left > 0)
++                QThread::usleep(left / 1000);
++        }
++        m_lastSwap.start();
++    }
++
++    QElapsedTimer m_lastSwap;
+ };
+ 
+ QT_END_NAMESPACE

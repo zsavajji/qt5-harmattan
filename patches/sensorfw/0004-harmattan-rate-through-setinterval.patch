@@ -1,0 +1,27 @@
+Harmattan: set the rate through setInterval
+
+The phone's sensord has no setDataRate D-Bus method (added in cd164b5): every sensor start
+failed with "No such method 'setDataRate'" and kept sensord's default rate.
+
+--- a/qt-api/abstractsensor_i.cpp
++++ b/qt-api/abstractsensor_i.cpp
+@@ -224,16 +224,9 @@
+ 
+ QDBusReply<void> AbstractSensorChannelInterface::setDataRate(int sessionId, double dataRate_Hz)
+ {
+-    clearError();
+-
+-    QList<QVariant> argumentList;
+-    argumentList << QVariant::fromValue(sessionId) << QVariant::fromValue(dataRate_Hz);
+-    QDBusPendingReply <void> returnValue = pimpl_->asyncCallWithArgumentList(QLatin1String("setDataRate"),
+-                                                                             argumentList);
+-    QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(returnValue, this);
+-    connect(watcher, SIGNAL(finished(QDBusPendingCallWatcher*)),
+-            SLOT(setDataRateFinished(QDBusPendingCallWatcher*)));
+-    return returnValue;
++    // Harmattan's sensord (0.6.46) predates the setDataRate D-Bus method (cd164b5, 2023): ask for
++    // the same rate through setInterval, in milliseconds.
++    return setInterval(sessionId, dataRate_Hz > 0 ? qRound(1000 / dataRate_Hz) : 0);
+ }
+ 
+ void AbstractSensorChannelInterface::setDataRateFinished(QDBusPendingCallWatcher *watch)

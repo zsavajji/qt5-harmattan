@@ -1,0 +1,22 @@
+SGX530: layers of at least 16x16 pixels
+
+The N9's SGX530 reports framebuffers smaller than 16x16 as incomplete, "missing attachment"
+and "Unsupported framebuffer format": FastBlur, whose last levels are 8, 4... pixels, drew
+nothing. Their textures are rendered at 16 pixels instead.
+
+--- a/src/quick/scenegraph/qsgopengllayer.cpp
++++ b/src/quick/scenegraph/qsgopengllayer.cpp
+@@ -225,8 +225,12 @@
+     markDirtyTexture();
+ }
+ 
+-void QSGOpenGLLayer::setSize(const QSize &size)
++void QSGOpenGLLayer::setSize(const QSize &pixelSize)
+ {
++    // Harmattan (SGX530): framebuffers under 16x16 are incomplete ("Unsupported framebuffer
++    // format"), and FastBlur's smallest levels drew nothing. They are rendered at 16 pixels:
++    // the texture is sampled in normalized coordinates, so only its resolution changes.
++    const QSize size = pixelSize.isEmpty() ? pixelSize : pixelSize.expandedTo(QSize(16, 16));
+     if (size == m_size)
+         return;
+     m_size = size;

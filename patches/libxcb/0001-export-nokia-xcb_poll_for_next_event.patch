@@ -1,0 +1,18 @@
+--- a/src/xcb_in.c	2026-09-26 12:10:42.337476342 +0200
++++ b/src/xcb_in.c	2026-09-26 12:10:42.386897460 +0200
+@@ -733,6 +733,15 @@
+     return poll_for_next_event(c, 1);
+ }
+ 
++/* Harmattan: Nokia's libxcb 1.7 exported this, and the phone's libX11 calls it. Without
++ * it, a process that loads this libxcb in place of the system one cannot use libX11
++ * (and so EGL): "undefined symbol: xcb_poll_for_next_event". */
++xcb_generic_event_t *xcb_poll_for_next_event(xcb_connection_t *c, int queued);
++xcb_generic_event_t *xcb_poll_for_next_event(xcb_connection_t *c, int queued)
++{
++    return poll_for_next_event(c, queued);
++}
++
+ xcb_generic_error_t *xcb_request_check(xcb_connection_t *c, xcb_void_cookie_t cookie)
+ {
+     uint64_t request;

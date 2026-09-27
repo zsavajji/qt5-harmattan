@@ -1,0 +1,16 @@
+Build the sensorfw plugin when configure found sensorfw
+
+The condition tested a CONFIG flag (sensorfw:) nothing sets, not the detected feature, so the
+plugin was only built with CONFIG+=sensorfw on the qmake command line.
+
+--- a/src/plugins/sensors/sensors.pro
++++ b/src/plugins/sensors/sensors.pro
+@@ -39,7 +39,7 @@
+ isEmpty(SENSORS_PLUGINS)|contains(SENSORS_PLUGINS, linux):linux:SUBDIRS += linux
+ isEmpty(SENSORS_PLUGINS)|contains(SENSORS_PLUGINS, iio-sensor-proxy):linux:qtHaveModule(dbus):SUBDIRS += iio-sensor-proxy
+ isEmpty(SENSORS_PLUGINS)|contains(SENSORS_PLUGINS, android):android:SUBDIRS += android
+-isEmpty(SENSORS_PLUGINS)|contains(SENSORS_PLUGINS, sensorfw):sensorfw:SUBDIRS += sensorfw
++isEmpty(SENSORS_PLUGINS)|contains(SENSORS_PLUGINS, sensorfw):qtConfig(sensorfw):SUBDIRS += sensorfw
+ isEmpty(SENSORS_PLUGINS)|contains(SENSORS_PLUGINS, sensortag):linux:SUBDIRS += sensortag
+ isEmpty(SENSORS_PLUGINS)|contains(SENSORS_PLUGINS, ios):darwin:SUBDIRS += ios
+ isEmpty(SENSORS_PLUGINS)|contains(SENSORS_PLUGINS, winrt):winrt:SUBDIRS += winrt

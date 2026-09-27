@@ -1,0 +1,42 @@
+MaskedItem: the mask's texture is the item's size again
+
+0015 made the mask's texture 1 px wider than the child's: the SGX read one of two same-size
+textures as empty. That was Qt Quick sharing one depth/stencil buffer between same-size
+FBOs, which qtdeclarative 0003 stopped, so both textures are the item's size and the shader
+samples them alike (checked on the phone with tests/masked-item.qml).
+
+--- a/src/meego/MaskedItem.qml
++++ b/src/meego/MaskedItem.qml
+@@ -54,16 +54,13 @@
+         }
+     }
+ 
+-    // SGX: of two source textures with the same size, one reads as empty. So the mask's is
+-    // 1 px wider, and maskScale maps the effect onto its first effect.width pixels.
+     property variant maskItem: ShaderEffectSource {
+         sourceItem: Item {
+             id: maskContainer
+-            width: effect.width + 1
++            width: effect.width
+             height: effect.height
+         }
+     }
+-    property real maskScale: effect.width / (effect.width + 1)
+ 
+     // The mask item goes into its container (a value set at creation doesn't call onMaskChanged).
+     property Item mask
+@@ -74,13 +71,11 @@
+ 
+     fragmentShader: "
+         uniform lowp float qt_Opacity;
+-        uniform highp float maskScale;
+         varying highp vec2 qt_TexCoord0;
+         uniform sampler2D targetItem;
+         uniform sampler2D maskItem;
+         void main() {
+-            gl_FragColor = texture2D(targetItem, qt_TexCoord0)
+-                * texture2D(maskItem, vec2(qt_TexCoord0.x * maskScale, qt_TexCoord0.y)).a * qt_Opacity;
++            gl_FragColor = texture2D(targetItem, qt_TexCoord0) * texture2D(maskItem, qt_TexCoord0).a * qt_Opacity;
+         }
+     "
+ }

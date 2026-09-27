@@ -1,0 +1,21 @@
+Install Sensors.conf into the sysroot when cross-building
+
+The sensorfw plugin installed it to an absolute /etc/xdg/QtProject, on the build host. It
+belongs in the target's /etc/xdg/QtProject, where both QSensorManager (the last
+ConfigLocation) and the plugin (QSettings system scope, XDG_CONFIG_DIRS) read it; it makes
+sensorfw the default backend and lists the sensors the plugin registers.
+
+diff --git a/src/plugins/sensors/sensorfw/sensorfw.pro b/src/plugins/sensors/sensorfw/sensorfw.pro
+index 63a6611..9fd9d61 100644
+--- a/src/plugins/sensors/sensorfw/sensorfw.pro
++++ b/src/plugins/sensors/sensorfw/sensorfw.pro
+@@ -6,7 +6,8 @@ include(sensorfw.pri)
+ QMAKE_USE += sensorfw
+ 
+ CONFIGFILES.files = Sensors.conf
+-CONFIGFILES.path = /etc/xdg/QtProject/
++# Cross builds: into the sysroot, not the build host's /etc.
++CONFIGFILES.path = $$[QT_SYSROOT]/etc/xdg/QtProject/
+ INSTALLS += CONFIGFILES
+ 
+ OTHER_FILES = plugin.json

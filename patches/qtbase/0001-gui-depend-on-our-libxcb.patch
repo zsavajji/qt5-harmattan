@@ -1,0 +1,14 @@
+diff --git a/src/gui/gui.pro b/src/gui/gui.pro
+index 20372d92..a2ad7c8d 100644
+--- a/src/gui/gui.pro
++++ b/src/gui/gui.pro
+@@ -102,3 +102,9 @@ QMAKE_DYNAMIC_LIST_FILE = $$PWD/QtGui.dynlist
+ 
+ TRACEPOINT_PROVIDER = $$PWD/qtgui.tracepoints
+ CONFIG += qt_tracepoints metatypes install_metatypes
++
++# Harmattan: the SGX libraries carry DT_RPATH /lib:/usr/lib, so whatever loads under them
++# (libX11 -> libxcb.so.1) comes from /usr/lib, ahead of LD_LIBRARY_PATH and the app's
++# RPATH, unless a libxcb.so.1 is already loaded. Depending on it here loads ours from
++# /opt/qt5/lib first, and the system libX11 then reuses it.
++qtConfig(xcb): QMAKE_USE_PRIVATE += xcb

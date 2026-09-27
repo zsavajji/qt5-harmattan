@@ -1,0 +1,16 @@
+diff --git a/src/meego/mdeclarativescreen.h b/src/meego/mdeclarativescreen.h
+index 81d73b32..1aa74f67 100644
+--- a/src/meego/mdeclarativescreen.h
++++ b/src/meego/mdeclarativescreen.h
+@@ -75,7 +75,10 @@ public:
+         NoDirection = 0,
+         CounterClockwise = 1
+     };
+-#ifdef ___arm___
++// qt5-harmattan: was "#ifdef ___arm___" (three underscores), never defined, so the N9 got the
++// portrait-native angles while rotation() computes landscape-native ones: a portrait app
++// reported InvertedLandscape (_MEEGOTOUCH_ORIENTATION_ANGLE 180).
++#ifdef __arm__
+     enum OrientationAngle {
+         PortraitAngle = 270,
+         LandscapeAngle = 0,

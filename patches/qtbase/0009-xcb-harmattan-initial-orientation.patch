@@ -1,0 +1,96 @@
+--- a/src/plugins/platforms/xcb/qxcbharmattanorientation.h
++++ b/src/plugins/platforms/xcb/qxcbharmattanorientation.h
+@@ -27,6 +27,11 @@
+ public:
+     QXcbHarmattanOrientation();
+ 
++    // The orientation right now, asked synchronously (at most 500 ms). QScreen reads the
++    // platform screen's orientation once, when it is created, before the event loop runs:
++    // without this, apps started in landscape and turned to portrait once the answer came.
++    static Qt::ScreenOrientation current();
++
+ private Q_SLOTS:
+     void valueChanged(const QVariantList &values, qulonglong timestamp);
+     void replyFinished(QDBusPendingCallWatcher *watcher);
+--- a/src/plugins/platforms/xcb/qxcbharmattanorientation.cpp
++++ b/src/plugins/platforms/xcb/qxcbharmattanorientation.cpp
+@@ -68,25 +68,40 @@
+ 
+ // Screen.TopEdge names the edge of the (natively landscape) display that is up:
+ // "top" landscape, "left" portrait, "bottom" landscape inverted, "right" portrait inverted.
+-void QXcbHarmattanOrientation::apply(const QVariantList &values)
++// Returns PrimaryOrientation when there's no value (yet).
++static Qt::ScreenOrientation fromTopEdge(const QVariantList &values)
+ {
+     if (values.isEmpty())
+-        return; // no value yet
++        return Qt::PrimaryOrientation;
+     QVariant value = values.first();
+     if (value.userType() == qMetaTypeId<QDBusVariant>())
+         value = value.value<QDBusVariant>().variant();
+     const QString edge = value.toString();
+-
+-    Qt::ScreenOrientation orientation;
+     if (edge == QLatin1String("top"))
+-        orientation = Qt::LandscapeOrientation;
+-    else if (edge == QLatin1String("left"))
+-        orientation = Qt::PortraitOrientation;
+-    else if (edge == QLatin1String("bottom"))
+-        orientation = Qt::InvertedLandscapeOrientation;
+-    else if (edge == QLatin1String("right"))
+-        orientation = Qt::InvertedPortraitOrientation;
+-    else
++        return Qt::LandscapeOrientation;
++    if (edge == QLatin1String("left"))
++        return Qt::PortraitOrientation;
++    if (edge == QLatin1String("bottom"))
++        return Qt::InvertedLandscapeOrientation;
++    if (edge == QLatin1String("right"))
++        return Qt::InvertedPortraitOrientation;
++    return Qt::PrimaryOrientation;
++}
++
++Qt::ScreenOrientation QXcbHarmattanOrientation::current()
++{
++    const QDBusMessage message = QDBusMessage::createMethodCall(QLatin1String(service), QLatin1String(path),
++                                                                QLatin1String(interface), QStringLiteral("Get"));
++    const QDBusMessage reply = QDBusConnection::systemBus().call(message, QDBus::Block, 500);
++    if (reply.type() != QDBusMessage::ReplyMessage || reply.arguments().isEmpty())
++        return Qt::PrimaryOrientation;
++    return fromTopEdge(qdbus_cast<QVariantList>(reply.arguments().at(0)));
++}
++
++void QXcbHarmattanOrientation::apply(const QVariantList &values)
++{
++    const Qt::ScreenOrientation orientation = fromTopEdge(values);
++    if (orientation == Qt::PrimaryOrientation)
+         return;
+ 
+     QScreen *screen = QGuiApplication::primaryScreen();
+--- a/src/plugins/platforms/xcb/qxcbscreen.cpp
++++ b/src/plugins/platforms/xcb/qxcbscreen.cpp
+@@ -38,6 +38,9 @@
+ ****************************************************************************/
+ 
+ #include "qxcbscreen.h"
++#if QT_CONFIG(dbus)
++#include "qxcbharmattanorientation.h"
++#endif
+ #include "qxcbwindow.h"
+ #include "qxcbcursor.h"
+ #include "qxcbimage.h"
+@@ -582,6 +585,14 @@
+                                     "edid data: " << edid;
+         }
+     }
++
++#if QT_CONFIG(dbus)
++    // Harmattan: start with the device's orientation, not the framebuffer's (landscape); see
++    // QXcbHarmattanOrientation::current().
++    const Qt::ScreenOrientation device = QXcbHarmattanOrientation::current();
++    if (device != Qt::PrimaryOrientation)
++        m_orientation = device;
++#endif
+ }
+ 
+ QXcbScreen::~QXcbScreen()

@@ -1,0 +1,14 @@
+# Fetched or built by scripts/ on the build box
+/src/
+/sysroot/
+/host/
+/build/
+/cross/
+/deb/
+# Private: device data, working notes, notes on unreleased Nokia material
+/backups/
+/PLAN.md
+/HANDOFF.md
+/notes/meltemi-savvy-port.md
+/.vscode/
+/.n9.lock/

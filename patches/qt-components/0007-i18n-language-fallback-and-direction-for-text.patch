@@ -1,0 +1,57 @@
+i18n: common_<language>.qm for Qt 5, directionForText without MeeGo Touch
+
+QLocale names the session language "it" it_IT, and only common_it.qm exists, so the country
+fallback of the MLocale branch now applies to QLocale too; before, every Qt 5 app loaded
+libmeegotouch.qm (engineering English, "!! Paste"). TextField and TextArea call
+locale.directionForText on a double click, which MLocaleWrapper lacked without MeeGo Touch, so
+the handler stopped before turning word selection on.
+
+diff --git a/src/meego/mtexttranslator.cpp b/src/meego/mtexttranslator.cpp
+--- a/src/meego/mtexttranslator.cpp	2026-09-26 17:26:13
++++ b/src/meego/mtexttranslator.cpp	2026-09-26 17:26:13
+@@ -71,7 +71,17 @@
+ 
+     //locale names have this syntax: xx_YY@..., but we do only need the first part
+     locale = locale.left(locale.indexOf('@'));
++#else
++#ifdef HAVE_SYSTEMINFO
++    QtMobility::QSystemInfo *sysInfo = new QtMobility::QSystemInfo(this);
++    QString locale = sysInfo->currentLanguage();
++#else
++    QString locale = QLocale::system().name();
++#endif
++#endif
++
+     //now check if we need the last part (this is true, when the appropriate file exists)
++    // qt5-harmattan: for QLocale too, which names "it" it_IT, and there is only common_it.qm
+     qmInfo.setFile(QString("%1%2%3%4")
+                      .arg(i10nDir)
+                      .arg("common_")
+@@ -82,15 +92,6 @@
+        locale = locale.left(locale.indexOf('_'));
+     }
+ 
+-#else
+-#ifdef HAVE_SYSTEMINFO
+-    QtMobility::QSystemInfo *sysInfo = new QtMobility::QSystemInfo(this);
+-    QString locale = sysInfo->currentLanguage();
+-#else
+-    QString locale = QLocale::system().name();
+-#endif
+-#endif
+-
+     m_translator = new QTranslator(this);
+ 
+     //fallback to default qm, when file not found
+diff --git a/src/meego/i18n/mlocalewrapper.h b/src/meego/i18n/mlocalewrapper.h
+--- a/src/meego/i18n/mlocalewrapper.h	2026-09-26 17:26:13
++++ b/src/meego/i18n/mlocalewrapper.h	2026-09-26 17:26:13
+@@ -170,6 +170,8 @@
+     // someone used it outside QML...
+ #ifndef HAVE_MEEGOTOUCH
+     QString language() const { return QString(); }
++    // qt5-harmattan: TextField and TextArea call it on double click (Qt::LayoutDirection)
++    Q_INVOKABLE int directionForText(const QString &text) const { return text.isRightToLeft() ? Qt::RightToLeft : Qt::LeftToRight; }
+ #else // HAVE_MEEGOTOUCH
+ 
+ 

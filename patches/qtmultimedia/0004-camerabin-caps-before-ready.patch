@@ -1,0 +1,135 @@
+camerabin: capture caps before READY on GStreamer 0.10 (N9 camera)
+
+Nokia's camerabin2 (camsrcbin with subdevsrc2) deadlocked going to PLAYING once any capture
+caps property (viewfinder, image, video or audio caps, even an unchanged one) had been set
+in READY, which start() always did: the GUI thread waited in subdevsrc2's ISP configure
+(gst_task_join) for a task that needed a pad lock the GUI thread held. The camera never
+left StartingStatus. With 0.10, load() now applies the caps in NULL, before READY; start()
+sets only changed ones and, if any changed, reloads the pipeline instead (reproduced and
+checked outside Qt with tests/gstprobe).
+
+--- a/src/plugins/gstreamer/camerabin/camerabinsession.h
++++ b/src/plugins/gstreamer/camerabin/camerabinsession.h
+@@ -198,6 +198,7 @@
+     void stop();
+ 
+     void setStatus(QCamera::Status status);
++    void setCaptureCaps(const char *property, GstCaps *caps);
+     void setStateHelper(QCamera::State state);
+     void setError(int error, const QString &errorString);
+ 
+@@ -260,6 +261,7 @@
+     bool m_viewfinderHasChanged;
+     bool m_inputDeviceHasChanged;
+     bool m_usingWrapperCameraBinSrc;
++    bool m_reloadBeforeStart;
+ 
+     class ViewfinderProbe : public QGstreamerVideoProbeControl {
+     public:
+--- a/src/plugins/gstreamer/camerabin/camerabinsession.cpp
++++ b/src/plugins/gstreamer/camerabin/camerabinsession.cpp
+@@ -144,6 +144,7 @@
+      m_viewfinderHasChanged(true),
+      m_inputDeviceHasChanged(true),
+      m_usingWrapperCameraBinSrc(false),
++     m_reloadBeforeStart(false),
+      m_viewfinderProbe(this),
+      m_audioSrc(0),
+      m_audioConvert(0),
+@@ -335,6 +336,29 @@
+     return caps;
+ }
+ 
++// Sets a capture caps property of camerabin, unless it holds these caps already. GStreamer 0.10
++// (Nokia's camerabin2 on the N9): once one was set in READY, the next PLAYING deadlocked in the
++// camera source. A change outside NULL is only noted there: load() applies it before READY.
++void CameraBinSession::setCaptureCaps(const char *property, GstCaps *caps)
++{
++    GstCaps *current = nullptr;
++    g_object_get(m_camerabin, property, &current, NULL);
++    const bool same = current && gst_caps_is_equal(current, caps);
++    if (current)
++        gst_caps_unref(current);
++    if (same)
++        return;
++#if !GST_CHECK_VERSION(1,0,0)
++    GstState state = GST_STATE_NULL;
++    gst_element_get_state(m_camerabin, &state, nullptr, 0);
++    if (state != GST_STATE_NULL) {
++        m_reloadBeforeStart = true;
++        return;
++    }
++#endif
++    g_object_set(m_camerabin, property, caps, NULL);
++}
++
+ void CameraBinSession::setupCaptureResolution()
+ {
+     QSize viewfinderResolution = m_viewfinderSettings.resolution();
+@@ -393,16 +417,16 @@
+     }
+ 
+     GstCaps *caps = resolutionToCaps(imageResolution);
+-    g_object_set(m_camerabin, IMAGE_CAPTURE_CAPS_PROPERTY, caps, NULL);
++    setCaptureCaps(IMAGE_CAPTURE_CAPS_PROPERTY, caps);
+     gst_caps_unref(caps);
+ 
+     qreal framerate = m_videoEncodeControl->videoSettings().frameRate();
+     caps = resolutionToCaps(videoResolution, framerate);
+-    g_object_set(m_camerabin, VIDEO_CAPTURE_CAPS_PROPERTY, caps, NULL);
++    setCaptureCaps(VIDEO_CAPTURE_CAPS_PROPERTY, caps);
+     gst_caps_unref(caps);
+ 
+     caps = resolutionToCaps(viewfinderResolution, viewfinderFrameRate, viewfinderPixelFormat);
+-    g_object_set(m_camerabin, VIEWFINDER_CAPS_PROPERTY, caps, NULL);
++    setCaptureCaps(VIEWFINDER_CAPS_PROPERTY, caps);
+     gst_caps_unref(caps);
+ 
+     // Special case when using mfw_v4lsrc
+@@ -458,7 +482,7 @@
+         gst_structure_set(structure, "channels", G_TYPE_INT, channelCount, NULL);
+ 
+     GstCaps *caps = gst_caps_new_full(structure, NULL);
+-    g_object_set(G_OBJECT(m_camerabin), AUDIO_CAPTURE_CAPS_PROPERTY, caps, NULL);
++    setCaptureCaps(AUDIO_CAPTURE_CAPS_PROPERTY, caps);
+     gst_caps_unref(caps);
+ 
+     if (m_audioEncoder)
+@@ -848,7 +872,7 @@
+ 
+ void CameraBinSession::load()
+ {
+-    if (m_status != QCamera::UnloadedStatus && !m_viewfinderHasChanged)
++    if (m_status != QCamera::UnloadedStatus && !m_viewfinderHasChanged && !m_reloadBeforeStart)
+         return;
+ 
+     setStatus(QCamera::LoadingStatus);
+@@ -873,6 +897,13 @@
+     }
+ #endif
+ 
++#if !GST_CHECK_VERSION(1,0,0)
++    // In NULL, before READY: see setCaptureCaps().
++    m_reloadBeforeStart = false;
++    setAudioCaptureCaps();
++    setupCaptureResolution();
++#endif
++
+     gst_element_set_state(m_camerabin, GST_STATE_READY);
+ }
+ 
+@@ -910,6 +941,14 @@
+ 
+     setupCaptureResolution();
+ 
++#if !GST_CHECK_VERSION(1,0,0)
++    if (m_reloadBeforeStart) {
++        // Settings changed since load(): reload with the new caps, then start (setStatus()).
++        load();
++        return;
++    }
++#endif
++
+     gst_element_set_state(m_camerabin, GST_STATE_PLAYING);
+ }
+ 

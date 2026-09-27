@@ -1,0 +1,103 @@
+Qt 4 pos is x and y in Qt Quick 2
+
+Qt Quick 2 items have no pos property (QGraphicsItem had it), so these threw:
+- EditBubble.geometry(): the text fields' tap-outside handler calls it to let taps on the bubble
+  through; it stopped there, so a tap outside a field with an open bubble didn't unfocus it.
+- SelectionHandles.js hit tests and rectangles: releasing a dragged handle stopped before closing
+  the magnifier.
+- NotificationBanner.show(): the "can't paste" banner.
+
+diff --git a/src/meego/EditBubble.js b/src/meego/EditBubble.js
+--- a/src/meego/EditBubble.js	2026-09-26 18:04:00
++++ b/src/meego/EditBubble.js	2026-09-26 18:04:00
+@@ -246,10 +246,11 @@
+       return;
+ 
+     var bubbleContent = popup.privateRect;
+-    var rect = {"left": bubbleContent.pos.x,
+-        "right": bubbleContent.pos.x + bubbleContent.width,
+-        "top": bubbleContent.pos.y,
+-        "bottom": bubbleContent.pos.y + bubbleContent.height};
++    // Qt Quick 2 items have no pos (QGraphicsItem); x and y are the same position.
++    var rect = {"left": bubbleContent.x,
++        "right": bubbleContent.x + bubbleContent.width,
++        "top": bubbleContent.y,
++        "bottom": bubbleContent.y + bubbleContent.height};
+ 
+     return rect;
+ }
+diff --git a/src/meego/SelectionHandles.js b/src/meego/SelectionHandles.js
+--- a/src/meego/SelectionHandles.js	2026-09-26 18:04:00
++++ b/src/meego/SelectionHandles.js	2026-09-26 18:04:00
+@@ -128,10 +128,10 @@
+     if (popup == null)
+         return;
+ 
+-    if (    hitPoint.x > popup.leftSelectionHandle.pos.x
+-         && hitPoint.x < popup.leftSelectionHandle.pos.x + popup.leftSelectionHandle.width
+-         && hitPoint.y > popup.leftSelectionHandle.pos.y
+-         && hitPoint.y < popup.leftSelectionHandle.pos.y + popup.leftSelectionHandle.height )
++    if (    hitPoint.x > popup.leftSelectionHandle.x
++         && hitPoint.x < popup.leftSelectionHandle.x + popup.leftSelectionHandle.width
++         && hitPoint.y > popup.leftSelectionHandle.y
++         && hitPoint.y < popup.leftSelectionHandle.y + popup.leftSelectionHandle.height )
+          return true;
+     return false;
+ }
+@@ -144,10 +144,10 @@
+         return;
+ 
+     var handle = popup.leftSelectionHandle;
+-    var rect = {"left": handle.pos.x,
+-        "right": handle.pos.x + handle.width,
+-        "top": handle.pos.y,
+-        "bottom": handle.pos.y + handle.height};
++    var rect = {"left": handle.x,
++        "right": handle.x + handle.width,
++        "top": handle.y,
++        "bottom": handle.y + handle.height};
+ 
+     return rect;
+ }
+@@ -160,10 +160,10 @@
+     if (popup == null)
+         return;
+ 
+-    if (    hitPoint.x > popup.rightSelectionHandle.pos.x
+-         && hitPoint.x < popup.rightSelectionHandle.pos.x + popup.rightSelectionHandle.width
+-         && hitPoint.y > popup.rightSelectionHandle.pos.y
+-         && hitPoint.y < popup.rightSelectionHandle.pos.y + popup.rightSelectionHandle.height )
++    if (    hitPoint.x > popup.rightSelectionHandle.x
++         && hitPoint.x < popup.rightSelectionHandle.x + popup.rightSelectionHandle.width
++         && hitPoint.y > popup.rightSelectionHandle.y
++         && hitPoint.y < popup.rightSelectionHandle.y + popup.rightSelectionHandle.height )
+          return true;
+     return false;
+ }
+@@ -176,10 +176,10 @@
+         return;
+ 
+     var handle = popup.rightSelectionHandle;
+-    var rect = {"left": handle.pos.x,
+-        "right": handle.pos.x + handle.width,
+-        "top": handle.pos.y,
+-        "bottom": handle.pos.y + handle.height};
++    var rect = {"left": handle.x,
++        "right": handle.x + handle.width,
++        "top": handle.y,
++        "bottom": handle.y + handle.height};
+ 
+     return rect;
+ }
+diff --git a/src/meego/NotificationBanner.qml b/src/meego/NotificationBanner.qml
+--- a/src/meego/NotificationBanner.qml	2026-09-26 18:04:00
++++ b/src/meego/NotificationBanner.qml	2026-09-26 18:04:00
+@@ -95,7 +95,7 @@
+         parent = __findParent();
+ 
+         var window = __findWindow();
+-        if(window != null) root.pos.y = 8 + window.__statusBarHeight;
++        if(window != null) root.y = 8 + window.__statusBarHeight;
+ 
+         animationShow.running = true;
+         if (root.timerEnabled)

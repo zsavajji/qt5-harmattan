@@ -1,0 +1,24 @@
+diff --git a/qml.pri b/qml.pri
+index af88ad5e..1ffa2286 100644
+--- a/qml.pri
++++ b/qml.pri
+@@ -74,7 +74,7 @@ for(targetpath, $$list($$unique(TARGETPATH))) {
+         qmltarget = qmltarget_$$replace(targetpath, /, _)
+         eval($${qmltarget}.CONFIG += no_check_exist executable)
+         eval($${qmltarget}.files = $$DESTDIR/$(TARGET))
+-        eval($${qmltarget}.files += stfu)
++        # qt5-harmattan: a dummy "stfu" entry stood here; Qt 5.15's qinstall fails on the missing file.
+         eval($${qmltarget}.path = $$installpath)
+         INSTALLS += $${qmltarget}
+     }
+@@ -115,7 +115,9 @@ install_native {
+ 
+ equals(QT_MAJOR_VERSION, 5):if(!debug_and_release|CONFIG(release, debug|release)) {
+     bump_qml_version_installed.CONFIG += no_path
+-    bump_qml_version_installed.commands = test -d $$[QT_INSTALL_IMPORTS]
++    # qt5-harmattan: was "test -d $$[QT_INSTALL_IMPORTS]", which fails in a cross build (the
++    # target path doesn't exist on the build host) and on a Qt 5 without QtQuick 1.
++    bump_qml_version_installed.commands = true
+ 
+     for(install, INSTALLS) {
+         isEmpty($${install}.files): next()

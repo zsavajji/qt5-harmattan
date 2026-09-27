@@ -1,0 +1,2 @@
+module GstProbe
+plugin gstprobe

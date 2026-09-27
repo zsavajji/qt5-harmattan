@@ -1,0 +1,30 @@
+QSslSocket: Qt's own CA certificates first
+
+The phone's root store (/etc/ssl/certs, an aegisfs view of the Aegis certificate store) is
+from 2011. Qt ships current Mozilla roots in <prefix>/ssl/certs (scripts/build-deps.sh),
+hashed for OpenSSL's directory lookup; the phone's store stays in the list for the
+certificates the user installs.
+
+--- a/src/network/ssl/qsslsocket.cpp
++++ b/src/network/ssl/qsslsocket.cpp
+@@ -358,6 +358,7 @@
+ 
+ #include <QtCore/qdebug.h>
+ #include <QtCore/qdir.h>
++#include <QtCore/qlibraryinfo.h>
+ #include <QtCore/qmutex.h>
+ #include <QtCore/qurl.h>
+ #include <QtCore/qelapsedtimer.h>
+@@ -2955,7 +2956,11 @@
+ */
+ QList<QByteArray> QSslSocketPrivate::unixRootCertDirectories()
+ {
+-    return QList<QByteArray>() <<  "/etc/ssl/certs/" // (K)ubuntu, OpenSUSE, Mandriva ...
++    // Harmattan: current Mozilla roots shipped with Qt (<prefix>/ssl/certs, one file per
++    // subject hash) ahead of the phone's own store from 2011 (/etc/ssl/certs, which also holds
++    // the certificates the user installs).
++    return QList<QByteArray>() << QFile::encodeName(QLibraryInfo::location(QLibraryInfo::PrefixPath) + QLatin1String("/ssl/certs/"))
++                               << "/etc/ssl/certs/" // (K)ubuntu, OpenSUSE, Mandriva ...
+                                << "/usr/lib/ssl/certs/" // Gentoo, Mandrake
+                                << "/usr/share/ssl/" // Centos, Redhat, SuSE
+                                << "/usr/local/ssl/" // Normal OpenSSL Tarball

@@ -1,0 +1,191 @@
+xcb: Harmattan multitouch from XInput 2.0 valuators
+
+The N9's X server (1.9.5) speaks XInput 2.0, which has no touch events. Its touchscreen
+driver (mtev) reports every finger in ordinary pointer events, as repeated groups of "Abs MT"
+valuators (position, touch major and minor, pressure), each group ending with the finger's
+tracking id. Qt 5.0-5.3 decoded them in qxcbconnection_maemo.cpp (behind
+XCB_USE_XINPUT2_MAEMO, removed in 5.4; Copyright (C) 2013 Digia Plc); this is the same
+decoding for the 5.15 plugin, through xcb-xinput, on servers older than XI 2.2 with a device
+that has those valuators. The last finger lifted comes as a button release, which releases
+every point. The pointer events count as synthesized from the touches, as with XI 2.2 pointer
+emulation: Qt Quick takes the touch events, widgets keep their mouse events.
+
+--- a/src/plugins/platforms/xcb/qxcbconnection.h
++++ b/src/plugins/platforms/xcb/qxcbconnection.h
+@@ -266,6 +266,26 @@
+ 
+     void xi2SetupDevice(void *info, bool removeExisting = true);
+     void xi2SetupDevices();
++    // Harmattan: the N9's X server speaks XInput 2.0 (no touch events) and reports every
++    // finger of its touchscreen in ordinary pointer events, as repeated groups of "Abs MT"
++    // valuators, each group ending with the finger's tracking id. Decoded into touch events
++    // in xi2HandleHarmattanTouch(); from Qt 5.0-5.3's qxcbconnection_maemo.cpp.
++    struct HarmattanTouch {
++        int deviceId = -1;
++        struct Valuator {
++            int number;
++            int label; // QXcbAtom::AbsMT*
++            double min;
++            double max;
++        };
++        QVector<Valuator> valuators; // by valuator number
++        QTouchDevice *device = nullptr;
++        QHash<int, QWindowSystemInterface::TouchPoint> points; // fingers down, by tracking id
++    };
++    HarmattanTouch m_harmattanTouch;
++    void xi2SetupHarmattanTouch(void *info);
++    void xi2HandleHarmattanTouch(void *xiDevEvent, QXcbWindow *platformWindow);
++
+     struct TouchDeviceData {
+         QTouchDevice *qtTouchDevice = nullptr;
+         QHash<int, QWindowSystemInterface::TouchPoint> touchPoints;
+--- a/src/plugins/platforms/xcb/qxcbconnection_xi2.cpp
++++ b/src/plugins/platforms/xcb/qxcbconnection_xi2.cpp
+@@ -306,6 +306,7 @@
+         if (deviceInfo->type == XCB_INPUT_DEVICE_TYPE_SLAVE_POINTER) {
+             m_xiSlavePointerIds.append(deviceInfo->deviceid);
+             xi2SetupDevice(deviceInfo, false);
++            xi2SetupHarmattanTouch(deviceInfo);
+         }
+     }
+ 
+@@ -597,6 +598,16 @@
+         case XCB_INPUT_BUTTON_PRESS:
+         case XCB_INPUT_BUTTON_RELEASE:
+         case XCB_INPUT_MOTION:
++            if (sourceDeviceId == m_harmattanTouch.deviceId) {
++                // Harmattan: touch events from the fingers. The pointer events count as
++                // synthesized from them, as with XI 2.2 pointer emulation, so Qt Quick uses the
++                // touch events and widgets keep their mouse events.
++                if (QXcbWindow *platformWindow = platformWindowFromId(xiDeviceEvent->event))
++                    xi2HandleHarmattanTouch(xiDeviceEvent, platformWindow);
++                if (!xi2MouseEventsDisabled() && eventListener)
++                    eventListener->handleXIMouseEvent(event, Qt::MouseEventSynthesizedBySystem);
++                break;
++            }
+             if (!xi2MouseEventsDisabled() && eventListener &&
+                     !(xiDeviceEvent->flags & XCB_INPUT_POINTER_EVENT_FLAGS_POINTER_EMULATED))
+                 eventListener->handleXIMouseEvent(event);
+@@ -628,6 +639,122 @@
+     }
+ }
+ 
++void QXcbConnection::xi2SetupHarmattanTouch(void *info)
++{
++    auto *deviceInfo = reinterpret_cast<xcb_input_xi_device_info_t *>(info);
++    if (isAtLeastXI22() || m_harmattanTouch.deviceId != -1)
++        return; // XI 2.2 servers send real touch events; the N9 has one touchscreen
++
++    QVector<HarmattanTouch::Valuator> valuators;
++    int fingers = 0;
++    auto it = xcb_input_xi_device_info_classes_iterator(deviceInfo);
++    for (; it.rem; xcb_input_device_class_next(&it)) {
++        if (it.data->type != XCB_INPUT_DEVICE_CLASS_TYPE_VALUATOR)
++            continue;
++        auto *vci = reinterpret_cast<xcb_input_valuator_class_t *>(it.data);
++        const int label = qatom(vci->label);
++        if (label != QXcbAtom::AbsMTPositionX && label != QXcbAtom::AbsMTPositionY
++            && label != QXcbAtom::AbsMTTouchMajor && label != QXcbAtom::AbsMTTouchMinor
++            && label != QXcbAtom::AbsMTPressure && label != QXcbAtom::AbsMTTrackingID)
++            continue;
++        valuators.append({ vci->number, label, fixed3232ToReal(vci->min), fixed3232ToReal(vci->max) });
++        if (label == QXcbAtom::AbsMTTrackingID)
++            ++fingers;
++    }
++    if (!fingers)
++        return;
++    std::sort(valuators.begin(), valuators.end(),
++              [](const HarmattanTouch::Valuator &a, const HarmattanTouch::Valuator &b) { return a.number < b.number; });
++
++    auto *device = new QTouchDevice;
++    device->setName(QString::fromUtf8(xcb_input_xi_device_info_name(deviceInfo), deviceInfo->name_len));
++    device->setType(QTouchDevice::TouchScreen);
++    device->setCapabilities(QTouchDevice::Position | QTouchDevice::Area | QTouchDevice::NormalizedPosition);
++    device->setMaximumTouchPoints(fingers);
++    QWindowSystemInterface::registerTouchDevice(device);
++    m_harmattanTouch.deviceId = deviceInfo->deviceid;
++    m_harmattanTouch.valuators = valuators;
++    m_harmattanTouch.device = device;
++    for (const auto &v : qAsConst(valuators))
++        qCDebug(lcQpaXInputDevices) << "Harmattan touch valuator" << v.number << atomName(atom(QXcbAtom::Atom(v.label)))
++                                    << "range" << v.min << v.max;
++    qCDebug(lcQpaXInputDevices) << "Harmattan touchscreen" << device->name() << "id" << deviceInfo->deviceid
++                                << "fingers" << fingers;
++}
++
++void QXcbConnection::xi2HandleHarmattanTouch(void *xiDevEvent, QXcbWindow *platformWindow)
++{
++    auto *ev = reinterpret_cast<qt_xcb_input_device_event_t *>(xiDevEvent);
++    HarmattanTouch &touch = m_harmattanTouch;
++    const QRect screen = platformWindow->xcbScreen()->geometry();
++
++    struct Finger { int id; QPointF normal; qreal w; qreal h; qreal pressure; };
++    QVector<Finger> fingers;
++    Finger f = { -1, QPointF(), 0, 0, 1 };
++    for (const auto &v : qAsConst(touch.valuators)) {
++        double value;
++        if (!xi2GetValuatorValueIfSet(ev, v.number, &value))
++            continue;
++        const qreal n = v.max > v.min ? (value - v.min) / (v.max - v.min) : 0;
++        switch (v.label) {
++        case QXcbAtom::AbsMTPositionX: f.normal.setX(n); break;
++        case QXcbAtom::AbsMTPositionY: f.normal.setY(n); break;
++        case QXcbAtom::AbsMTTouchMajor: f.w = value; break;
++        case QXcbAtom::AbsMTTouchMinor: f.h = value; break;
++        case QXcbAtom::AbsMTPressure: f.pressure = n; break;
++        case QXcbAtom::AbsMTTrackingID: // ends a finger's group
++            f.id = int(value);
++            fingers.append(f);
++            f = { -1, QPointF(), 0, 0, 1 };
++            break;
++        }
++    }
++
++    // The last finger lifted comes as a button release: everything is released then.
++    const bool allUp = ev->event_type == XCB_INPUT_BUTTON_RELEASE;
++    QList<QWindowSystemInterface::TouchPoint> points;
++    QSet<int> reported;
++    for (const Finger &finger : qAsConst(fingers)) {
++        const QPointF pos(screen.x() + finger.normal.x() * screen.width(),
++                          screen.y() + finger.normal.y() * screen.height());
++        auto known = touch.points.find(finger.id);
++        QWindowSystemInterface::TouchPoint tp = known != touch.points.end() ? *known : QWindowSystemInterface::TouchPoint();
++        if (allUp)
++            tp.state = Qt::TouchPointReleased;
++        else if (known == touch.points.end())
++            tp.state = Qt::TouchPointPressed;
++        else
++            tp.state = tp.area.center() != pos ? Qt::TouchPointMoved : Qt::TouchPointStationary;
++        tp.id = finger.id;
++        tp.area = QRectF(pos.x() - finger.w / 2, pos.y() - finger.h / 2, finger.w, finger.h);
++        tp.normalPosition = finger.normal;
++        tp.pressure = finger.pressure;
++        points.append(tp);
++        reported.insert(finger.id);
++        if (Q_UNLIKELY(lcQpaXInputEvents().isDebugEnabled()))
++            qCDebug(lcQpaXInputEvents, "Harmattan touch id %d state %d pos %.1f,%.1f normal %.3f,%.3f pointer %d,%d",
++                    tp.id, int(tp.state), pos.x(), pos.y(), finger.normal.x(), finger.normal.y(),
++                    int(fixed1616ToReal(ev->root_x)), int(fixed1616ToReal(ev->root_y)));
++        if (allUp)
++            touch.points.remove(finger.id);
++        else
++            touch.points.insert(finger.id, tp);
++    }
++    // Fingers that were down and aren't reported any more are released, once.
++    for (auto it = touch.points.begin(); it != touch.points.end();) {
++        if (!allUp && reported.contains(it.key())) {
++            ++it;
++            continue;
++        }
++        it->state = Qt::TouchPointReleased;
++        points.append(*it);
++        it = touch.points.erase(it);
++    }
++    if (!points.isEmpty())
++        QWindowSystemInterface::handleTouchEvent(platformWindow->window(), ev->time, touch.device, points,
++                                                 keyboard()->translateModifiers(ev->mods.effective));
++}
++
+ bool QXcbConnection::xi2MouseEventsDisabled() const
+ {
+     static bool xi2MouseDisabled = qEnvironmentVariableIsSet("QT_XCB_NO_XI2_MOUSE");

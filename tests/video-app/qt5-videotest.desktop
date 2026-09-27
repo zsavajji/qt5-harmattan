@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Qt 5 Video Test
+Exec=/opt/qt5-videotest/bin/qt5-videotest
+Icon=/usr/share/icons/hicolor/80x80/apps/qt5-videotest80.png
+X-Window-Icon=
+X-HildonDesk-ShowInToolbar=true
+X-Osso-Type=application/x-executable

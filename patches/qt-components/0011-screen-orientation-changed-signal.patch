@@ -1,0 +1,20 @@
+Screen: connect to QScreen::orientationChanged
+
+Qt 5 has no QScreen::currentOrientationChanged; the connect failed with a warning at startup.
+
+diff --git a/src/meego/mdeclarativescreen.cpp b/src/meego/mdeclarativescreen.cpp
+--- a/src/meego/mdeclarativescreen.cpp	2026-09-26 18:10:50
++++ b/src/meego/mdeclarativescreen.cpp	2026-09-26 18:10:50
+@@ -467,8 +467,10 @@
+         QWindow* w = qobject_cast<QWindow*>(o);
+         if (!d->window) {
+             d->window = w;
+-            connect(w->screen(), SIGNAL(currentOrientationChanged(Qt::ScreenOrientation)),
+-                    this, SLOT(_q_updateOrientationAngle()));
++            // qt5-harmattan: QScreen has no currentOrientationChanged. Usually the same screen
++            // as in initContextSubscriber(), hence UniqueConnection.
++            connect(w->screen(), SIGNAL(orientationChanged(Qt::ScreenOrientation)),
++                    this, SLOT(_q_updateOrientationAngle()), Qt::UniqueConnection);
+         }
+         if (d->window)
+             d->setMinimized(d->window.data()->windowState() & Qt::WindowMinimized);

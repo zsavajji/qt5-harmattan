@@ -1,0 +1,8 @@
+<aegis>
+  <request>
+    <!-- positioningd's client interface (/etc/dbus-1/session.d/aegis.positioningd.conf) -->
+    <credential name="Location" />
+    <for path="/opt/qt5-positiontest/bin/qt5-positiontest" />
+    <for path="/opt/qt5-positiontest/dev/bin/qt5-positiontest-dev" />
+  </request>
+</aegis>

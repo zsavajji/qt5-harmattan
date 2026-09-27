@@ -1,0 +1,26 @@
+--- a/qmaliitplatforminputcontext.cpp
++++ b/qmaliitplatforminputcontext.cpp
+@@ -221,12 +221,17 @@
+     QInputMethodQueryEvent query(queries);
+     QGuiApplication::sendEvent(qGuiApp->focusObject(), &query);
+ 
+-    if (queries & Qt::ImSurroundingText)
+-        d->imState["surroundingText"] = query.value(Qt::ImSurroundingText);
+-    if (queries & Qt::ImCursorPosition)
+-        d->imState["cursorPosition"] = query.value(Qt::ImCursorPosition);
+-    if (queries & Qt::ImAnchorPosition)
+-        d->imState["anchorPosition"] = query.value(Qt::ImAnchorPosition);
++    // Only answered queries: an object that isn't a text input (Qt Quick's root item, once
++    // focus leaves a field) gives invalid QVariants, which D-Bus can't marshal. Every update
++    // then failed until a field refreshed them, and the keyboard kept a stale state.
++    auto set = [&](const char *key, Qt::InputMethodQuery q) {
++        const QVariant v = query.value(q);
++        if ((queries & q) && v.isValid())
++            d->imState[key] = v;
++    };
++    set("surroundingText", Qt::ImSurroundingText);
++    set("cursorPosition", Qt::ImCursorPosition);
++    set("anchorPosition", Qt::ImAnchorPosition);
+     if (queries & Qt::ImCursorRectangle) {
+         QRect rect = query.value(Qt::ImCursorRectangle).toRect();
+         rect = qGuiApp->inputMethod()->inputItemTransform().mapRect(rect);

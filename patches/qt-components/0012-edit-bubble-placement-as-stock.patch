@@ -1,0 +1,21 @@
+--- a/src/meego/EditBubble.js
++++ b/src/meego/EditBubble.js
+@@ -185,11 +185,16 @@
+ 
+     rect.x = Math.min(Math.max(px, MARGIN_XLARGE - SHADOW_SIZE), viewport.width - rect.width);
+ 
+-    if (py > SHADOW_SIZE + statusBarCoveredHeight(bubble)) {
++    // Only the visible part has to clear the status bar: the buttons' images have a
++    // transparent top margin (EditBubbleButtonStyle.backgroundMarginTop). Without it a field
++    // right under the status bar got its bubble below, where the stock components put it above.
++    if (py - SHADOW_SIZE + 15 >= statusBarCoveredHeight(bubble)) {
+         rect.y = py - SHADOW_SIZE;
+         rect.arrowDown = true;
+     } else {
+-        if (rect.positionOffset == 0) {
++        // The offset clears the selection handles below a selection; a plain paste bubble goes
++        // right under the text, as in the stock (PR1.3) components.
++        if (rect.positionOffset == 0 || input.selectionStart == input.selectionEnd) {
+             rect.y = Math.min(Math.max(ipoint.y + irect.height, 0),
+                               fpoint.y + frect.height);
+         }

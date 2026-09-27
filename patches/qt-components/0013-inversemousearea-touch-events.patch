@@ -1,0 +1,87 @@
+--- a/src/meego/minversemousearea.cpp
++++ b/src/meego/minversemousearea.cpp
+@@ -41,6 +41,7 @@
+ #include "minversemousearea.h"
+ 
+ #include <QMouseEvent>
++#include <QTouchEvent>
+ 
+ 
+ // Threshold in QDeclarativeFlickable is 20
+@@ -110,25 +111,56 @@
+     Q_UNUSED(obj);
+ 
+     if (!m_enabled || !isVisible())
+-        return false;    
+-    // Qt 5: the window's own mouse events, in window (scene) coordinates. Presses on the
+-    // keyboard never come here, it is another X window.
+-    switch (ev->type()) {
+-    case QEvent::MouseButtonPress: {
++        return false;
++    // Qt 5: the window's own events, in window (scene) coordinates. Presses on the keyboard
++    // never come here, it is another X window. A finger arrives as touch events, and as mouse
++    // events synthesized from them only after Qt Quick has handled the touch: a tap on the
++    // edit bubble had already closed it by the release, so it counted as outside and the
++    // field lost focus. So touches are read from their touch events, like mouse events.
++    QEvent::Type type = ev->type();
++    QPointF pos;
++    switch (type) {
++    case QEvent::MouseButtonPress:
++    case QEvent::MouseMove:
++    case QEvent::MouseButtonRelease: {
+         QMouseEvent *me = static_cast<QMouseEvent *>(ev);
+-        QPointF mappedPos = mapToRootItem(me->windowPos());
++        if (me->source() == Qt::MouseEventSynthesizedBySystem)
++            return false;
++        pos = me->windowPos();
++        break;
++    }
++    case QEvent::TouchBegin:
++    case QEvent::TouchUpdate:
++    case QEvent::TouchEnd: {
++        QTouchEvent *te = static_cast<QTouchEvent *>(ev);
++        if (te->touchPoints().isEmpty())
++            return false;
++        pos = te->touchPoints().first().pos();
++        type = type == QEvent::TouchBegin ? QEvent::MouseButtonPress
++             : type == QEvent::TouchEnd ? QEvent::MouseButtonRelease : QEvent::MouseMove;
++        break;
++    }
++    case QEvent::TouchCancel:
++        m_pressed = false;
++        return false;
++    default:
++        return false;
++    }
+ 
+-        m_pressPos = me->windowPos();
+-        m_pressed = !contains(mapFromScene(me->windowPos()));
++    switch (type) {
++    case QEvent::MouseButtonPress: {
++        QPointF mappedPos = mapToRootItem(pos);
+ 
++        m_pressPos = pos;
++        m_pressed = !contains(mapFromScene(pos));
++
+         if (m_pressed)
+             emit pressedOutside(mappedPos.x(), mappedPos.y());
+         break;
+     }
+     case QEvent::MouseMove: {
+         if (m_pressed) {
+-            QMouseEvent *me = static_cast<QMouseEvent *>(ev);
+-            const QPointF dist = me->windowPos() - m_pressPos;
++            const QPointF dist = pos - m_pressPos;
+ 
+             if (dist.x() * dist.x() + dist.y() * dist.y() > FlickThresholdSquare)
+                 m_pressed = false;
+@@ -136,8 +168,7 @@
+         break;
+     }
+     case QEvent::MouseButtonRelease: {
+-        QMouseEvent *me = static_cast<QMouseEvent *>(ev);
+-        QPointF mappedPos = mapToRootItem(me->windowPos());
++        QPointF mappedPos = mapToRootItem(pos);
+ 
+         if (m_pressed) {
+             m_pressed = false;

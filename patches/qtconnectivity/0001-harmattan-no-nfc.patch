@@ -1,0 +1,28 @@
+Harmattan: no Qt NFC
+
+Qt 5.15's only Linux NFC backend talks to neard, which the N9 doesn't have (its NFC stack
+is Nokia's own), so on the linux-harmattan-g++ mkspec Qt NFC isn't built: a module that
+never finds a reader. Qt Bluetooth builds as usual (BlueZ 4 over D-Bus, classic only).
+
+--- a/src/src.pro
++++ b/src/src.pro
+@@ -1,6 +1,8 @@
+ TEMPLATE = subdirs
+ 
+-SUBDIRS += bluetooth nfc
++SUBDIRS += bluetooth
++# Nokia N9/N950: no NFC. Qt's only Linux backend is neard; the phone's NFC stack is Nokia's.
++!linux-harmattan-g++: SUBDIRS += nfc
+ android {
+     SUBDIRS += android
+     android.depends += bluetooth nfc
+@@ -17,7 +19,8 @@
+ }
+ 
+ qtHaveModule(quick) {
+-    imports.depends += bluetooth nfc
++    imports.depends += bluetooth
++    contains(SUBDIRS, nfc): imports.depends += nfc
+     SUBDIRS += imports
+ }
+ 

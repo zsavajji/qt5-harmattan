@@ -1,0 +1,613 @@
+Harmattan: a position plugin for Nokia's positioningd
+
+The phone has no GeoClue: positions come from positioningd on the session bus
+(com.nokia.positioningd.client), as they did for Qt Mobility's maemo backend
+(dbuscomm_maemo.cpp, dbusserver_maemo.cpp). Each source registers a listener
+(registerListener(service, path) -> id, methods, minimum interval) under its own bus name,
+com.nokia.qlocation.I<uuid>, and drives its session with configSession(id, command, method,
+interval): start/stop, satellites start/stop, methods, interval. The daemon calls back
+com.nokia.qlocation.updates (positionUpdate, satellitesInViewUpdate, satellitesInUseUpdate:
+QDataStream bytes of Qt Mobility's types, Qt 4.7's stream version; currentSettings);
+calls from anyone but the daemon we registered with are ignored.
+
+Both position and satellite sources; area monitoring comes from positionpoll. The daemon's
+D-Bus policy (/etc/dbus-1/session.d/aegis.positioningd.conf) lets only processes with Aegis'
+Location credential call it: without it the sources report AccessError. On this mkspec the
+plugin replaces the two GeoClue ones.
+
+--- a/src/plugins/position/position.pro
++++ b/src/plugins/position/position.pro
+@@ -2,8 +2,13 @@
+ 
+ QT_FOR_CONFIG += positioning-private
+ 
+-linux|freebsd|openbsd|netbsd:qtHaveModule(dbus):SUBDIRS += geoclue
+-linux|freebsd|openbsd|netbsd:qtHaveModule(dbus):SUBDIRS += geoclue2
++linux-harmattan-g++ {
++    # Nokia N9/N950: positioningd, as Qt Mobility; there is no GeoClue.
++    SUBDIRS += positioningd
++} else {
++    linux|freebsd|openbsd|netbsd:qtHaveModule(dbus):SUBDIRS += geoclue
++    linux|freebsd|openbsd|netbsd:qtHaveModule(dbus):SUBDIRS += geoclue2
++}
+ qtConfig(gypsy):SUBDIRS += gypsy
+ qtConfig(winrt_geolocation):SUBDIRS += winrt
+ qtHaveModule(simulator):SUBDIRS += simulator
+--- /dev/null
++++ b/src/plugins/position/positioningd/plugin.json
+@@ -0,0 +1,9 @@
++{
++    "Keys": ["positioningd"],
++    "Provider": "positioningd",
++    "Position": true,
++    "Satellite": true,
++    "Monitor": false,
++    "Priority": 1000,
++    "Testable": false
++}
+--- /dev/null
++++ b/src/plugins/position/positioningd/positioningd.cpp
+@@ -0,0 +1,404 @@
++/****************************************************************************
++**
++** Copyright (C) 2026 Andrea Faggin
++**
++** Harmattan (N9) positions and satellites from Nokia's positioningd, over the session bus.
++** The protocol and the sources' behaviour follow Qt Mobility's maemo backend
++** (dbuscomm_maemo.cpp, qgeopositioninfosource_maemo.cpp: Copyright (C) 2013 Digia Plc).
++**
++** This file may be used under the terms of the GNU Lesser General Public License version 3,
++** or the GNU General Public License version 2 or 3, as the Qt Positioning module it belongs to.
++**
++****************************************************************************/
++
++#include "positioningd.h"
++
++#include <QtCore/QDataStream>
++#include <QtCore/QLoggingCategory>
++#include <QtCore/QUuid>
++#include <QtDBus/QDBusConnection>
++#include <QtDBus/QDBusMessage>
++#include <QtDBus/QDBusServiceWatcher>
++
++Q_LOGGING_CATEGORY(lcPositioningd, "qt.positioning.positioningd")
++
++QT_BEGIN_NAMESPACE
++
++static const QString Daemon = QStringLiteral("com.nokia.positioningd.client"); // also its interface
++static const QString DaemonPath = QStringLiteral("/com/nokia/positioningd/client");
++static const int DefaultTimeout = 120000; // requestUpdate(0): a cold GPS start
++
++// positioningd serializes Qt Mobility's types with Qt 4.7's QDataStream (version Qt_4_6).
++// QGeoPositionInfo has the same fields in Qt 5 (timestamp, coordinate, attributes).
++static QGeoPositionInfo positionInfo(const QByteArray &data)
++{
++    QDataStream s(data);
++    s.setVersion(QDataStream::Qt_4_6);
++    QGeoPositionInfo info;
++    s >> info;
++    return info;
++}
++
++// Qt Mobility's QGeoSatelliteInfo: PRN, signal strength, then the attributes (Qt 5's differs).
++static QList<QGeoSatelliteInfo> satellites(const QByteArray &data)
++{
++    QDataStream s(data);
++    s.setVersion(QDataStream::Qt_4_6);
++    quint32 n = 0;
++    s >> n;
++    QList<QGeoSatelliteInfo> list;
++    while (n-- && s.status() == QDataStream::Ok) {
++        int prn = 0, signal = 0;
++        QHash<int, double> attributes;
++        s >> prn >> signal >> attributes;
++        QGeoSatelliteInfo info;
++        info.setSatelliteSystem(QGeoSatelliteInfo::GPS);
++        info.setSatelliteIdentifier(prn);
++        info.setSignalStrength(signal);
++        for (auto a = attributes.cbegin(); a != attributes.cend(); ++a)
++            info.setAttribute(QGeoSatelliteInfo::Attribute(a.key()), a.value());
++        list.append(info);
++    }
++    return list;
++}
++
++static QDBusMessage callDaemon(const QString &method, const QVariantList &args)
++{
++    QDBusMessage call = QDBusMessage::createMethodCall(Daemon, DaemonPath, Daemon, method);
++    call.setArguments(args);
++    QDBusMessage reply = QDBusConnection::sessionBus().call(call);
++    if (reply.type() != QDBusMessage::ReplyMessage)
++        qCWarning(lcPositioningd) << method << reply.errorName() << reply.errorMessage();
++    return reply;
++}
++
++Positioningd::Positioningd(QObject *parent) : QObject(parent)
++{
++    // Qt Mobility's names, a UUID each (a bus name element can't start with a digit).
++    const QString id = QLatin1Char('I') + QUuid::createUuid().toString(QUuid::Id128);
++    m_service = QStringLiteral("com.nokia.qlocation.") + id;
++    m_path = QStringLiteral("/com/nokia/qlocation/") + id;
++    QDBusConnection bus = QDBusConnection::sessionBus();
++    if (!bus.registerObject(m_path, this, QDBusConnection::ExportAllSlots)
++            || !bus.registerService(m_service)) {
++        qCWarning(lcPositioningd) << "cannot register" << m_service << bus.lastError().message();
++        return;
++    }
++    auto *watcher = new QDBusServiceWatcher(Daemon, bus, QDBusServiceWatcher::WatchForRegistration, this);
++    connect(watcher, &QDBusServiceWatcher::serviceRegistered, this, [this] {
++        if (registerListener())
++            emit restarted();
++    });
++    registerListener();
++}
++
++Positioningd::~Positioningd()
++{
++    QDBusConnection bus = QDBusConnection::sessionBus();
++    bus.unregisterService(m_service);
++    bus.unregisterObject(m_path);
++}
++
++bool Positioningd::registerListener()
++{
++    const QDBusMessage reply = callDaemon(QStringLiteral("registerListener"), {m_service, m_path});
++    const QVariantList args = reply.arguments();
++    registered = reply.type() == QDBusMessage::ReplyMessage && args.size() == 3;
++    accessDenied = reply.errorName() == QLatin1String("org.freedesktop.DBus.Error.AccessDenied");
++    if (registered) {
++        m_id = args.at(0).toInt();
++        methods = args.at(1).toUInt();
++        minimumInterval = args.at(2).toInt();
++        m_daemon = reply.service();
++    }
++    return registered;
++}
++
++bool Positioningd::configure(int command, int method, int interval)
++{
++    return registered && callDaemon(QStringLiteral("configSession"), {m_id, command, method, interval})
++            .type() == QDBusMessage::ReplyMessage;
++}
++
++QGeoPositionInfo Positioningd::latestPosition(bool satelliteOnly)
++{
++    const QDBusMessage reply = callDaemon(QStringLiteral("latestPosition"), {satelliteOnly});
++    return positionInfo(reply.arguments().value(0).toByteArray());
++}
++
++// Our bus name is no secret: only take updates from the daemon we registered with.
++bool Positioningd::fromDaemon() const
++{
++    return calledFromDBus() && message().service() == m_daemon;
++}
++
++void Positioningd::positionUpdate(const QByteArray &update)
++{
++    if (fromDaemon())
++        emit position(positionInfo(update));
++}
++
++void Positioningd::satellitesInViewUpdate(const QByteArray &update)
++{
++    if (fromDaemon())
++        emit satellitesInView(satellites(update));
++}
++
++void Positioningd::satellitesInUseUpdate(const QByteArray &update)
++{
++    if (fromDaemon())
++        emit satellitesInUse(satellites(update));
++}
++
++void Positioningd::currentSettings(quint32 newMethods, quint32 interval)
++{
++    if (!fromDaemon())
++        return;
++    methods = newMethods;
++    minimumInterval = int(interval);
++    emit settingsChanged();
++}
++
++QGeoPositionInfoSourcePositioningd::QGeoPositionInfoSourcePositioningd(QObject *parent)
++    : QGeoPositionInfoSource(parent), m_daemon(new Positioningd(this))
++{
++    m_requestTimer.setSingleShot(true);
++    connect(&m_requestTimer, &QTimer::timeout, this, [this] {
++        finishRequest();
++        emit updateTimeout();
++    });
++    connect(m_daemon, &Positioningd::position, this, &QGeoPositionInfoSourcePositioningd::newPosition);
++    connect(m_daemon, &Positioningd::settingsChanged,
++            this, &QGeoPositionInfoSource::supportedPositioningMethodsChanged);
++    connect(m_daemon, &Positioningd::restarted, this, [this] {
++        m_error = NoError;
++        int command = Positioningd::SetMethods | Positioningd::SetInterval;
++        if (m_running || m_requestTimer.isActive())
++            command |= Positioningd::Start;
++        m_daemon->configure(command, int(preferredPositioningMethods()),
++                            qMax(updateInterval(), minimumUpdateInterval()));
++    });
++    m_error = m_daemon->registered ? NoError : m_daemon->accessDenied ? AccessError : UnknownSourceError;
++}
++
++QGeoPositionInfoSourcePositioningd::~QGeoPositionInfoSourcePositioningd()
++{
++    if (m_running || m_requestTimer.isActive())
++        m_daemon->configure(Positioningd::Stop);
++}
++
++void QGeoPositionInfoSourcePositioningd::setUpdateInterval(int msec)
++{
++    msec = qMax(msec, minimumUpdateInterval());
++    QGeoPositionInfoSource::setUpdateInterval(msec);
++    m_daemon->configure(Positioningd::SetInterval, 0, msec);
++}
++
++void QGeoPositionInfoSourcePositioningd::setPreferredPositioningMethods(PositioningMethods methods)
++{
++    QGeoPositionInfoSource::setPreferredPositioningMethods(methods);
++    m_daemon->configure(Positioningd::SetMethods, int(preferredPositioningMethods()));
++}
++
++QGeoPositionInfo QGeoPositionInfoSourcePositioningd::lastKnownPosition(bool fromSatellitePositioningMethodsOnly) const
++{
++    return m_daemon->latestPosition(fromSatellitePositioningMethodsOnly);
++}
++
++QGeoPositionInfoSource::PositioningMethods QGeoPositionInfoSourcePositioningd::supportedPositioningMethods() const
++{
++    return PositioningMethods(int(m_daemon->methods));
++}
++
++int QGeoPositionInfoSourcePositioningd::minimumUpdateInterval() const
++{
++    return m_daemon->minimumInterval;
++}
++
++QGeoPositionInfoSource::Error QGeoPositionInfoSourcePositioningd::error() const
++{
++    return m_error;
++}
++
++bool QGeoPositionInfoSourcePositioningd::available()
++{
++    if (m_error != NoError)
++        emit QGeoPositionInfoSource::error(m_error);
++    return m_error == NoError;
++}
++
++void QGeoPositionInfoSourcePositioningd::startUpdates()
++{
++    if (m_running || !available())
++        return;
++    m_running = true;
++    m_lostFix = false;
++    if (!m_requestTimer.isActive())
++        m_daemon->configure(Positioningd::Start);
++}
++
++void QGeoPositionInfoSourcePositioningd::stopUpdates()
++{
++    if (!m_running)
++        return;
++    m_running = false;
++    if (!m_requestTimer.isActive())
++        m_daemon->configure(Positioningd::Stop);
++}
++
++void QGeoPositionInfoSourcePositioningd::requestUpdate(int timeout)
++{
++    if (timeout != 0 && timeout < minimumUpdateInterval()) {
++        emit updateTimeout();
++        return;
++    }
++    if (!available())
++        return;
++    if (!m_requestTimer.isActive()) {
++        // The first fix at the fastest rate, not after the session's interval (Qt Mobility).
++        if (updateInterval() > minimumUpdateInterval())
++            m_daemon->configure(Positioningd::SetInterval, 0, minimumUpdateInterval());
++        if (!m_running)
++            m_daemon->configure(Positioningd::Start);
++    }
++    m_requestTimer.start(timeout ? timeout : DefaultTimeout);
++}
++
++void QGeoPositionInfoSourcePositioningd::finishRequest()
++{
++    m_requestTimer.stop();
++    if (!m_running)
++        m_daemon->configure(Positioningd::Stop);
++    if (updateInterval() > minimumUpdateInterval())
++        m_daemon->configure(Positioningd::SetInterval, 0, updateInterval());
++}
++
++void QGeoPositionInfoSourcePositioningd::newPosition(const QGeoPositionInfo &update)
++{
++    if (!m_running && !m_requestTimer.isActive())
++        return;
++    if (!update.isValid()) {
++        // positioningd lost the fix (Qt Mobility's reading): once, until updates come back.
++        if (m_running && !m_requestTimer.isActive() && !m_lostFix) {
++            m_lostFix = true;
++            emit updateTimeout();
++        }
++        return;
++    }
++    m_lostFix = false;
++    if (m_requestTimer.isActive())
++        finishRequest();
++    emit positionUpdated(update);
++}
++
++QGeoSatelliteInfoSourcePositioningd::QGeoSatelliteInfoSourcePositioningd(QObject *parent)
++    : QGeoSatelliteInfoSource(parent), m_daemon(new Positioningd(this))
++{
++    m_requestTimer.setSingleShot(true);
++    connect(&m_requestTimer, &QTimer::timeout, this, [this] {
++        finishRequest();
++        emit requestTimeout();
++    });
++    connect(m_daemon, &Positioningd::satellitesInView, this, [this](const QList<QGeoSatelliteInfo> &s) {
++        if (!m_running && !m_requestTimer.isActive())
++            return;
++        emit satellitesInViewUpdated(s);
++        // A second list in view without one in use: none in use to wait for (Qt Mobility).
++        if (m_requestTimer.isActive() && m_seenInView)
++            finishRequest();
++        m_seenInView = true;
++    });
++    connect(m_daemon, &Positioningd::satellitesInUse, this, [this](const QList<QGeoSatelliteInfo> &s) {
++        if (!m_running && !m_requestTimer.isActive())
++            return;
++        emit satellitesInUseUpdated(s);
++        if (m_requestTimer.isActive())
++            finishRequest();
++    });
++    connect(m_daemon, &Positioningd::restarted, this, [this] {
++        m_error = NoError;
++        if (m_running || m_requestTimer.isActive())
++            m_daemon->configure(Positioningd::SatStart);
++    });
++    m_error = m_daemon->registered ? NoError : m_daemon->accessDenied ? AccessError : UnknownSourceError;
++}
++
++QGeoSatelliteInfoSourcePositioningd::~QGeoSatelliteInfoSourcePositioningd()
++{
++    if (m_running || m_requestTimer.isActive())
++        m_daemon->configure(Positioningd::SatStop);
++}
++
++int QGeoSatelliteInfoSourcePositioningd::minimumUpdateInterval() const
++{
++    return m_daemon->minimumInterval;
++}
++
++QGeoSatelliteInfoSource::Error QGeoSatelliteInfoSourcePositioningd::error() const
++{
++    return m_error;
++}
++
++bool QGeoSatelliteInfoSourcePositioningd::available()
++{
++    if (m_error != NoError)
++        emit QGeoSatelliteInfoSource::error(m_error);
++    return m_error == NoError;
++}
++
++void QGeoSatelliteInfoSourcePositioningd::startUpdates()
++{
++    if (m_running || !available())
++        return;
++    m_running = true;
++    if (!m_requestTimer.isActive())
++        m_daemon->configure(Positioningd::SatStart);
++}
++
++void QGeoSatelliteInfoSourcePositioningd::stopUpdates()
++{
++    if (!m_running)
++        return;
++    m_running = false;
++    if (!m_requestTimer.isActive())
++        m_daemon->configure(Positioningd::SatStop);
++}
++
++void QGeoSatelliteInfoSourcePositioningd::requestUpdate(int timeout)
++{
++    if (timeout != 0 && timeout < minimumUpdateInterval()) {
++        emit requestTimeout();
++        return;
++    }
++    if (!available())
++        return;
++    if (!m_running && !m_requestTimer.isActive())
++        m_daemon->configure(Positioningd::SatStart);
++    m_seenInView = false;
++    m_requestTimer.start(timeout ? timeout : DefaultTimeout);
++}
++
++void QGeoSatelliteInfoSourcePositioningd::finishRequest()
++{
++    m_requestTimer.stop();
++    if (!m_running)
++        m_daemon->configure(Positioningd::SatStop);
++}
++
++QGeoPositionInfoSource *QGeoPositionInfoSourceFactoryPositioningd::positionInfoSource(QObject *parent)
++{
++    return new QGeoPositionInfoSourcePositioningd(parent);
++}
++
++QGeoSatelliteInfoSource *QGeoPositionInfoSourceFactoryPositioningd::satelliteInfoSource(QObject *parent)
++{
++    return new QGeoSatelliteInfoSourcePositioningd(parent);
++}
++
++QGeoAreaMonitorSource *QGeoPositionInfoSourceFactoryPositioningd::areaMonitor(QObject *parent)
++{
++    Q_UNUSED(parent);
++    return nullptr; // the positionpoll plugin's, on top of our positions
++}
++
++QT_END_NAMESPACE
+--- /dev/null
++++ b/src/plugins/position/positioningd/positioningd.h
+@@ -0,0 +1,141 @@
++/****************************************************************************
++**
++** Copyright (C) 2026 Andrea Faggin
++**
++** Harmattan (N9) positions and satellites from Nokia's positioningd, over the session bus.
++** The protocol and the sources' behaviour follow Qt Mobility's maemo backend
++** (dbuscomm_maemo.cpp, qgeopositioninfosource_maemo.cpp: Copyright (C) 2013 Digia Plc).
++**
++** This file may be used under the terms of the GNU Lesser General Public License version 3,
++** or the GNU General Public License version 2 or 3, as the Qt Positioning module it belongs to.
++**
++****************************************************************************/
++
++#ifndef POSITIONINGD_H
++#define POSITIONINGD_H
++
++#include <QtCore/QTimer>
++#include <QtDBus/QDBusContext>
++#include <QtPositioning/QGeoPositionInfoSource>
++#include <QtPositioning/QGeoPositionInfoSourceFactory>
++#include <QtPositioning/QGeoSatelliteInfoSource>
++
++QT_BEGIN_NAMESPACE
++
++// One listener registered with positioningd (registerListener): the daemon calls the slots
++// below on our own service and path. Needs Aegis' Location credential, or every call to the
++// daemon is AccessDenied.
++class Positioningd : public QObject, protected QDBusContext
++{
++    Q_OBJECT
++    Q_CLASSINFO("D-Bus Interface", "com.nokia.qlocation.updates")
++
++public:
++    enum Command { Start = 1, Stop = 2, SetMethods = 4, SetInterval = 8, SatStart = 16, SatStop = 32 };
++
++    explicit Positioningd(QObject *parent);
++    ~Positioningd() override;
++    bool configure(int command, int method = 0, int interval = 0);
++    QGeoPositionInfo latestPosition(bool satelliteOnly);
++
++    bool registered = false;
++    bool accessDenied = false;
++    quint32 methods = 0;
++    int minimumInterval = 1000;
++
++public Q_SLOTS:
++    Q_NOREPLY void positionUpdate(const QByteArray &update);
++    Q_NOREPLY void satellitesInViewUpdate(const QByteArray &update);
++    Q_NOREPLY void satellitesInUseUpdate(const QByteArray &update);
++    Q_NOREPLY void currentSettings(quint32 newMethods, quint32 interval);
++
++Q_SIGNALS:
++    void position(const QGeoPositionInfo &update);
++    void satellitesInView(const QList<QGeoSatelliteInfo> &satellites);
++    void satellitesInUse(const QList<QGeoSatelliteInfo> &satellites);
++    void settingsChanged();
++    void restarted(); // registered again with a new daemon: sessions need their commands again
++
++private:
++    bool registerListener();
++    bool fromDaemon() const;
++    QString m_service;
++    QString m_path;
++    QString m_daemon; // positioningd's unique bus name
++    int m_id = -1;
++};
++
++class QGeoPositionInfoSourcePositioningd : public QGeoPositionInfoSource
++{
++    Q_OBJECT
++
++public:
++    explicit QGeoPositionInfoSourcePositioningd(QObject *parent);
++    ~QGeoPositionInfoSourcePositioningd() override;
++
++    void setUpdateInterval(int msec) override;
++    void setPreferredPositioningMethods(PositioningMethods methods) override;
++    QGeoPositionInfo lastKnownPosition(bool fromSatellitePositioningMethodsOnly = false) const override;
++    PositioningMethods supportedPositioningMethods() const override;
++    int minimumUpdateInterval() const override;
++    Error error() const override;
++
++public Q_SLOTS:
++    void startUpdates() override;
++    void stopUpdates() override;
++    void requestUpdate(int timeout = 0) override;
++
++private:
++    bool available();
++    void newPosition(const QGeoPositionInfo &update);
++    void finishRequest();
++
++    Positioningd *m_daemon;
++    QTimer m_requestTimer;
++    bool m_running = false;
++    bool m_lostFix = false;
++    Error m_error = NoError;
++};
++
++class QGeoSatelliteInfoSourcePositioningd : public QGeoSatelliteInfoSource
++{
++    Q_OBJECT
++
++public:
++    explicit QGeoSatelliteInfoSourcePositioningd(QObject *parent);
++    ~QGeoSatelliteInfoSourcePositioningd() override;
++
++    int minimumUpdateInterval() const override;
++    Error error() const override;
++
++public Q_SLOTS:
++    void startUpdates() override;
++    void stopUpdates() override;
++    void requestUpdate(int timeout = 0) override;
++
++private:
++    bool available();
++    void finishRequest();
++
++    Positioningd *m_daemon;
++    QTimer m_requestTimer;
++    bool m_running = false;
++    bool m_seenInView = false;
++    Error m_error = NoError;
++};
++
++class QGeoPositionInfoSourceFactoryPositioningd : public QObject, public QGeoPositionInfoSourceFactory
++{
++    Q_OBJECT
++    Q_PLUGIN_METADATA(IID "org.qt-project.qt.position.sourcefactory/5.0" FILE "plugin.json")
++    Q_INTERFACES(QGeoPositionInfoSourceFactory)
++
++public:
++    QGeoPositionInfoSource *positionInfoSource(QObject *parent) override;
++    QGeoSatelliteInfoSource *satelliteInfoSource(QObject *parent) override;
++    QGeoAreaMonitorSource *areaMonitor(QObject *parent) override;
++};
++
++QT_END_NAMESPACE
++
++#endif // POSITIONINGD_H
+--- /dev/null
++++ b/src/plugins/position/positioningd/positioningd.pro
+@@ -0,0 +1,12 @@
++TARGET = qtposition_positioningd
++
++QT = core positioning dbus
++
++HEADERS += positioningd.h
++SOURCES += positioningd.cpp
++
++OTHER_FILES += plugin.json
++
++PLUGIN_TYPE = position
++PLUGIN_CLASS_NAME = QGeoPositionInfoSourceFactoryPositioningd
++load(qt_plugin)

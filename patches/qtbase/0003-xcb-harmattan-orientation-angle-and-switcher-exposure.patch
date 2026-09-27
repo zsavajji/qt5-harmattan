@@ -1,0 +1,114 @@
+diff --git a/src/plugins/platforms/xcb/qxcbwindow.cpp b/src/plugins/platforms/xcb/qxcbwindow.cpp
+index 1baf5858..e8d273f5 100644
+--- a/src/plugins/platforms/xcb/qxcbwindow.cpp
++++ b/src/plugins/platforms/xcb/qxcbwindow.cpp
+@@ -491,6 +491,7 @@ void QXcbWindow::create()
+     setWindowState(window()->windowStates());
+     setWindowFlags(window()->flags());
+     setWindowTitle(window()->title());
++    handleContentOrientationChange(window()->contentOrientation());
+ 
+ #if QT_CONFIG(xcb_xlib)
+     // force sync to read outstanding requests - see QTBUG-29106
+@@ -1878,9 +1879,41 @@ void QXcbWindow::handleConfigureNotifyEvent(const xcb_configure_notify_event_t *
+     m_dirtyFrameMargins = true;
+ }
+ 
++// Harmattan: a minimized window stays mapped, because the home screen shows it in the
++// task switcher. It counts as exposed only while its thumbnail is on screen, which the home
++// screen signals with _MEEGOTOUCH_VISIBLE_IN_SWITCHER; otherwise Qt Quick would keep
++// rendering in the background.
+ bool QXcbWindow::isExposed() const
+ {
+-    return m_mapped;
++    return m_mapped && (!m_minimized || m_visibleInSwitcher);
++}
++
++void QXcbWindow::updateHarmattanExposure(bool wasExposed)
++{
++    const bool exposed = isExposed();
++    if (exposed == wasExposed)
++        return;
++    QWindowSystemInterface::handleExposeEvent(window(), exposed ? QRegion(QRect(QPoint(), geometry().size()))
++                                                                : QRegion());
++}
++
++// Harmattan: mcompositor and its swipe extension read gestures relative to
++// _MEEGOTOUCH_ORIENTATION_ANGLE (0 landscape, 270 portrait, 180 and 90 inverted). Without it
++// a portrait app is taken for landscape, and a side swipe becomes a swipe down, which
++// closes the app instead of minimizing it.
++void QXcbWindow::handleContentOrientationChange(Qt::ScreenOrientation orientation)
++{
++    static const xcb_atom_t angleAtom = connection()->internAtom("_MEEGOTOUCH_ORIENTATION_ANGLE");
++    quint32 angle = 0;
++    switch (orientation) {
++    case Qt::PortraitOrientation: angle = 270; break;
++    case Qt::InvertedLandscapeOrientation: angle = 180; break;
++    case Qt::InvertedPortraitOrientation: angle = 90; break;
++    default: angle = 0; break; // landscape, the display's native orientation
++    }
++    xcb_change_property(xcb_connection(), XCB_PROP_MODE_REPLACE, m_window, angleAtom,
++                        XCB_ATOM_CARDINAL, 32, 1, &angle);
++    xcb_flush(xcb_connection());
+ }
+ 
+ bool QXcbWindow::isEmbedded() const
+@@ -2267,12 +2300,28 @@ void QXcbWindow::handlePropertyNotifyEvent(const xcb_property_notify_event_t *ev
+ 
+     const bool propertyDeleted = event->state == XCB_PROPERTY_DELETE;
+ 
++    static const xcb_atom_t visibleInSwitcherAtom = connection()->internAtom("_MEEGOTOUCH_VISIBLE_IN_SWITCHER");
++    if (event->atom == visibleInSwitcherAtom) {
++        const bool wasExposed = isExposed();
++        m_visibleInSwitcher = false;
++        auto reply = Q_XCB_REPLY(xcb_get_property, xcb_connection(), 0, m_window, visibleInSwitcherAtom,
++                                 XCB_ATOM_ANY, 0, 1);
++        // The home screen writes it as CARDINAL, format 8 (seen: 0 and 1); accept 32 as well.
++        if (!propertyDeleted && reply && xcb_get_property_value_length(reply.get()) > 0) {
++            const auto *v = static_cast<const uchar *>(xcb_get_property_value(reply.get()));
++            m_visibleInSwitcher = reply->format == 32 ? *reinterpret_cast<const quint32 *>(v) != 0 : v[0] != 0;
++        }
++        updateHarmattanExposure(wasExposed);
++        return;
++    }
++
+     if (event->atom == atom(QXcbAtom::_NET_WM_STATE) || event->atom == atom(QXcbAtom::WM_STATE)) {
+         if (propertyDeleted)
+             return;
+ 
+         Qt::WindowStates newState = Qt::WindowNoState;
+ 
++        const bool wasExposed = isExposed();
+         if (event->atom == atom(QXcbAtom::WM_STATE)) { // WM_STATE: Quick check for 'Minimize'.
+             auto reply = Q_XCB_REPLY(xcb_get_property, xcb_connection(),
+                                      0, m_window, atom(QXcbAtom::WM_STATE),
+@@ -2306,6 +2355,7 @@ void QXcbWindow::handlePropertyNotifyEvent(const xcb_property_notify_event_t *ev
+             if ((m_windowState & Qt::WindowMinimized) && connection()->mouseGrabber() == this)
+                 connection()->setMouseGrabber(nullptr);
+         }
++        updateHarmattanExposure(wasExposed);
+         return;
+     } else if (event->atom == atom(QXcbAtom::_NET_FRAME_EXTENTS)) {
+         m_dirtyFrameMargins = true;
+diff --git a/src/plugins/platforms/xcb/qxcbwindow.h b/src/plugins/platforms/xcb/qxcbwindow.h
+index e90ebe1f..39dc4911 100644
+--- a/src/plugins/platforms/xcb/qxcbwindow.h
++++ b/src/plugins/platforms/xcb/qxcbwindow.h
+@@ -110,6 +110,7 @@ public:
+     void propagateSizeHints() override;
+ 
+     void requestActivateWindow() override;
++    void handleContentOrientationChange(Qt::ScreenOrientation orientation) override;
+ 
+     bool setKeyboardGrabEnabled(bool grab) override;
+     bool setMouseGrabEnabled(bool grab) override;
+@@ -266,6 +267,9 @@ protected:
+     bool m_embedded = false;
+     bool m_alertState = false;
+     bool m_minimized = false;
++    // Harmattan: the home screen shows minimized windows in its switcher (see isExposed()).
++    bool m_visibleInSwitcher = false;
++    void updateHarmattanExposure(bool wasExposed);
+     bool m_trayIconWindow = false;
+     xcb_window_t m_netWmUserTimeWindow = XCB_NONE;
+ 
