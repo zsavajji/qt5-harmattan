@@ -1,0 +1,41 @@
+Harmattan build: QtContacts and QtVersit only
+
+QtOrganizer, QtVersitOrganizer and their plugins and QML import are left out: the phone's
+calendar is not in Tracker in a shape any organizer backend reads, so they would ship
+without one. QtVersit stays, because the QtContacts QML import links it.
+
+The memory plugin gets a PLUGIN_CLASS_NAME, as upstream did after this commit (4b2bdce3, which
+names it QMemoryContactsPlugin; this is the real class): without one qmake writes
+Qt5Contacts_.cmake, an unnamed plugin target that breaks find_package(Qt5Contacts) in every
+CMake app ("_populate_Contacts_plugin_properties Macro invoked with incorrect arguments").
+
+--- a/src/imports/imports.pro
++++ b/src/imports/imports.pro
+@@ -1,2 +1,2 @@
+ TEMPLATE = subdirs
+-SUBDIRS += contacts organizer
++SUBDIRS += contacts
+--- a/src/plugins/contacts/memory/memory.pro
++++ b/src/plugins/contacts/memory/memory.pro
+@@ -2,6 +2,7 @@ TARGET = qtcontacts_memory
+ QT = core contacts
+ 
+ PLUGIN_TYPE = contacts
++PLUGIN_CLASS_NAME = QContactMemoryEngineFactory
+ load(qt_plugin)
+ 
+ HEADERS += \
+--- a/src/plugins/plugins.pro
++++ b/src/plugins/plugins.pro
+@@ -1,2 +1,2 @@
+ TEMPLATE = subdirs
+-SUBDIRS += contacts organizer versit
++SUBDIRS += contacts
+--- a/src/src.pro
++++ b/src/src.pro
+@@ -1,4 +1,4 @@
+ TEMPLATE = subdirs
+ CONFIG  += ordered
+-SUBDIRS = contacts organizer versit versitorganizer plugins
++SUBDIRS = contacts versit plugins
+ qtHaveModule(qml): SUBDIRS += imports

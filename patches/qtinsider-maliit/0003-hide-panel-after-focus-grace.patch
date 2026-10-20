@@ -1,0 +1,70 @@
+Hide the software input panel 100 ms after it is asked to, and not at all if a show comes first,
+as the Qt 4 context did (maliit 0.81's MInputContext, SoftwareInputPanelHideTimer). Both kinds of
+hide go through the delay: the components' TextArea and TextField call Qt.inputMethod.hide() when
+they lose focus, and 0001 hides when focus leaves text input. Hiding at once, an app that moves
+focus off a field and straight back - a Send button beside a TextArea does, through the
+TextArea's InverseMouseArea, then forceActiveFocus() - saw the keyboard drop and rise again
+(verified on the phone: the window grew by the keyboard's 318 px and shrank back within ~250 ms
+of the tap).
+
+--- a/qmaliitplatforminputcontext.cpp
++++ b/qmaliitplatforminputcontext.cpp
+@@ -131,6 +131,8 @@
+     // Harmattan: the 0.81 keyboard offers copy and paste only when told they are possible.
+     bool copyAvailable = false;
+     bool pasteAvailable = false;
++    // Harmattan: a hide takes effect after a grace period, see the constructor.
++    QTimer hideTimer;
+ 
+     QMaliitPlatformInputContext *q;
+ };
+@@ -152,6 +154,20 @@
+     };
+     connect(QGuiApplication::clipboard(), &QClipboard::dataChanged, this, updatePaste);
+     updatePaste();
++
++    // Harmattan: a hide - asked for (the components' TextArea and TextField call
++    // Qt.inputMethod.hide() on losing focus) or from focus leaving text input - happens after
++    // the 100 ms the Qt 4 context waited (maliit 0.81's MInputContext,
++    // SoftwareInputPanelHideTimer), and a show in the meantime cancels it. An app that moves
++    // focus off a field and straight back - a Send button beside the field does, through the
++    // field's InverseMouseArea - otherwise sees the keyboard drop and rise again.
++    d->hideTimer.setSingleShot(true);
++    d->hideTimer.setInterval(100);
++    connect(&d->hideTimer, &QTimer::timeout, this, [this] {
++        d->server->hideInputMethod();
++        d->inputPanelState = InputPanelHidden;
++        emitInputPanelVisibleChanged();
++    });
+ }
+ 
+ 
+@@ -307,6 +323,7 @@
+     // focused) but never to hide it. So hide it here when focus leaves text input, and show
+     // it when focus reaches text input after a request that came first ("pending").
+     if (inputMethodAccepted()) {
++        d->hideTimer.stop();
+         if (window && d->inputPanelState != InputPanelHidden)
+             showInputPanel();
+     } else if (d->inputPanelState == InputPanelShown) {
+@@ -334,6 +351,8 @@
+ {
+     if (debug) qDebug() << __PRETTY_FUNCTION__;
+ 
++    d->hideTimer.stop();
++
+     if (debug)
+         qDebug() << "showInputPanel";
+ 
+@@ -350,9 +369,8 @@
+ {
+     if (debug) qDebug() << __PRETTY_FUNCTION__;
+ 
+-    d->server->hideInputMethod();
+-    d->inputPanelState = InputPanelHidden;
+-    emitInputPanelVisibleChanged();
++    // Harmattan: after the grace period, see the constructor.
++    d->hideTimer.start();
+ }
+ 
+ bool QMaliitPlatformInputContext::isInputPanelVisible() const

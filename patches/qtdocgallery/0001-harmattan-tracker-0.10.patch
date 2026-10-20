@@ -1,0 +1,19 @@
+Harmattan: Tracker 0.10's libtracker-sparql
+
+The tracker backend asks pkg-config for tracker-sparql-0.14. The phone runs Tracker 0.10, whose
+libtracker-sparql-0.10 (in the SDK sysroot) has every function and value type the backend uses:
+tracker_sparql_connection_get/_query and the cursor's next, get_n_columns, get_value_type,
+get_string, get_integer and get_double. The backend is built with tracker_enabled=yes
+(scripts/build-qt.sh); without it the module builds the null gallery, which finds nothing.
+
+--- a/src/gallery/tracker/tracker.pri
++++ b/src/gallery/tracker/tracker.pri
+@@ -3,7 +3,7 @@ INCLUDEPATH += $$PWD
+ QT += dbus
+ 
+ CONFIG += link_pkgconfig
+-PKGCONFIG_PRIVATE += tracker-sparql-0.14
++PKGCONFIG_PRIVATE += tracker-sparql-0.10
+ 
+ PRIVATE_HEADERS += \
+         $$PWD/qgallerydbusinterface_p.h \

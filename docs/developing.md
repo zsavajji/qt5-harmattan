@@ -99,6 +99,8 @@ Beyond Qt Quick, the runtime has:
 | Qt Feedback | `import QtFeedback 5.0`; C++: `PKGCONFIG += Qt5Feedback` | Haptics through the phone's feedback daemon: `ThemeEffect` (`Press`, `Release`, their `Weak` variants, drag, `Appear`, `Disappear`), as the stock apps' touch feedback. No `HapticsEffect` (custom vibration) yet. |
 | Qt Positioning | `QT += positioning`, `import QtPositioning 5.15` | Through the phone's positioning daemon, with the user's settings (GPS; network positioning goes through Nokia's online service, untested): `PositionSource`, `QGeoPositionInfoSource`, `QGeoSatelliteInfoSource` (satellites in view; the daemon sent no in-use lists in testing), area monitoring. The app needs the `Location` credential (step 7). No maps (Qt Location). |
 | Qt Bluetooth | `QT += bluetooth`, `import QtBluetooth 5.15` | Classic Bluetooth through the phone's BlueZ 4: the local adapter (power, name, address), device and service discovery. Sockets (RFCOMM, L2CAP) are there but not tested yet. No Bluetooth Low Energy (BlueZ 4.91 predates it). No credential needed. |
+| Qt Contacts | `QT += contacts`, `import QtContacts 5.0` | The phone's address book (Tracker), read-only: the default `QContactManager` and `ContactModel` see the people the address book shows, with names, nickname, phone numbers and e-mail addresses (home and work). Saving and removing contacts aren't supported. The app needs the `TrackerReadAccess` credential (step 7). Not yet checked on a phone. |
+| Qt Document Gallery | `QT += docgallery`, `import QtDocGallery 5.0` | The phone's media index (Tracker): `DocumentGalleryModel` and `QDocumentGallery` queries over images, music, videos and documents. The app needs the `TrackerReadAccess` credential (step 7). Not yet checked on a phone. |
 | Image formats | (plugins) | Besides PNG and JPEG: WebP, GIF, SVG, TIFF, TGA, ICO, ICNS, WBMP. |
 
 ## 5. Build it
@@ -240,6 +242,11 @@ opened. With it, Qt uses Nokia's camera stack, and the viewfinder is shown witho
 daemon only answers processes that hold it. Request it as above, with
 `<credential name="Location" />`. Without it `PositionSource.sourceError` becomes
 `PositionSource.AccessError` as soon as the source is started.
+
+**Apps that read contacts or the media gallery** need Aegis' `TrackerReadAccess` credential:
+both modules query the phone's Tracker database, which answers only processes that hold it.
+Request it as above, with `<credential name="TrackerReadAccess" />`. Without it a contact fetch
+fails with `QContactManager::PermissionsError`.
 
 ## Notes
 

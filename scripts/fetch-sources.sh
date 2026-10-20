@@ -35,6 +35,11 @@ clone libxkbcommon-1.13.2 https://github.com/xkbcommon/libxkbcommon d1442aaa6b63
 clone sensorfw https://github.com/sailfishos/sensorfw b37c5b467e8be554066dfd1c4138dbff8eec77b3 # 0.15.2
 # Task 6: QtFeedback (ThemeEffect) for Qt 5; patches/qtfeedback adds a meegofeedbackd backend.
 clone qtfeedback https://github.com/sailfishos/qtfeedback 2cd40d1deca20f883107215cb826fd47c408a5cb # mer-master
+# QtDocGallery (DocumentGalleryModel) with its Tracker backend; patches/qtdocgallery: Tracker 0.10.
+clone qtdocgallery https://github.com/qt/qtdocgallery 8cbbeb060188191b833863f23bc513909a9a4d0a # master
+# QtContacts (and QtVersit, which its QML import links); patches/qtpim adds a Tracker 0.10 engine.
+# dev at its last Qt 5 commit: the Qt 6 port starts right after it.
+clone qtpim https://github.com/qt/qtpim e2314b052cfcce077ead9e16c7a5effbb290ec09 # dev
 # References only, not built: an earlier xcb plugin for the N9, and Maliit's protocol versions.
 clone qt5-meego-platform-plugin https://github.com/qtinsider/qt5-meego-platform-plugin 7085af3d5b8e29715149b9636c49af345510178a # master
 clone maliit-0.81.4 https://github.com/maliit/framework 3431d906d11f8cc81754432bda52abcea8e0f083 # 0.81.4

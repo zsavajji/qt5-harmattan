@@ -67,7 +67,8 @@ build qt5-harmattan libs "" "Qt 5.15 runtime in /opt/qt5
  Qt 5.15 (KDE patch collection) for Qt Quick 2 apps on Harmattan, next to the system Qt 4:
  xcb with EGL on the SGX530, multitouch, orientation, the status bar and switcher, with
  OpenSSL 3.5 and current CA roots, sensors (through sensord), multimedia and the camera
- (GStreamer 0.10), haptics (meegofeedbackd), positioning (positioningd) and Bluetooth (BlueZ 4)."
+ (GStreamer 0.10), haptics (meegofeedbackd), positioning (positioningd), Bluetooth (BlueZ 4),
+ and the address book and media gallery (Tracker)."
 
 d=$(stage qt5-meego-components)
 copy qml "$d" \( -path 'qml/com/*' -o -path 'qml/Qt/labs/components/*' \)

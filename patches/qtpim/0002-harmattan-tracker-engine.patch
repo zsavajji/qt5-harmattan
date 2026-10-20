@@ -1,0 +1,522 @@
+Harmattan: a read-only Tracker 0.10 contacts engine, the default manager
+
+The phone keeps its address book in Tracker (the nco ontology; Nokia's Qt 4 plugin was
+qtcontacts-tracker, for Qt Mobility). This engine, "tracker", reads the people the address
+book shows (nco:PersonContact, without the owner's nco:default-contact-me card): names,
+nickname, a display label, phone numbers with their subtypes and e-mail addresses, the
+person's own (home context) and their affiliation's (work context). Five plain SPARQL queries
+over org.freedesktop.Tracker1.Resources.SparqlQuery, joined on the contact's IRI; every
+class and property was checked against the phone's 32-nco.ontology. Filters and sort orders
+are applied in memory with the base engine's testFilter/addSorted, so all of them work;
+fetch requests complete inside startRequest, as the memory engine's do. Saving, removing,
+relationships and collections are refused. Tracker's GraphUpdated on an nco class emits
+dataChanged().
+
+Q_CONTACTS_DEFAULT_ENGINE makes it the manager QContactManager() opens. Apps need Aegis'
+TrackerReadAccess credential: without it Tracker refuses the query (PermissionsError).
+
+--- a/src/contacts/contacts.pro
++++ b/src/contacts/contacts.pro
+@@ -1,6 +1,10 @@
+ TARGET = QtContacts
+ QT = core-private
+ 
++# Harmattan: the phone's address book is the default manager (QContactManager()), not the
++# empty "invalid" one; the tracker plugin, src/plugins/contacts/tracker.
++DEFINES += Q_CONTACTS_DEFAULT_ENGINE=tracker
++
+ MODULE_PLUGIN_TYPES = \
+     contacts
+ 
+--- a/src/plugins/contacts/contacts.pro
++++ b/src/plugins/contacts/contacts.pro
+@@ -2,7 +2,7 @@ TEMPLATE = subdirs
+ 
+ CONFIG += ordered
+ 
+-SUBDIRS += memory
++SUBDIRS += memory tracker
+ 
+ #contains(mobility_modules,serviceframework): SUBDIRS += serviceactionmanager
+ 
+--- /dev/null
++++ b/src/plugins/contacts/tracker/qcontacttrackerengine.cpp
+@@ -0,0 +1,369 @@
++/****************************************************************************
++**
++** Copyright (C) 2026 Andrea Faggin
++**
++** The Harmattan (N9) address book for QtContacts: a read-only engine over Tracker 0.10,
++** where the phone keeps its contacts (the nco ontology).
++**
++** This file may be used under the terms of the GNU Lesser General Public License version 3,
++** or the GNU General Public License version 2 or 3, as the Qt Contacts module it belongs to.
++**
++****************************************************************************/
++
++#include "qcontacttrackerengine_p.h"
++
++#include <QtContacts/qcontactdetails.h>
++#include <QtContacts/qcontactidfilter.h>
++#include <QtContacts/qcontactrequests.h>
++#include <QtCore/QHash>
++#include <QtDBus/QDBusConnection>
++#include <QtDBus/QDBusMessage>
++#include <QtDBus/QDBusMetaType>
++#include <QtDBus/QDBusReply>
++
++QT_BEGIN_NAMESPACE_CONTACTS
++
++namespace {
++
++const QLatin1String TrackerService("org.freedesktop.Tracker1");
++const QLatin1String TrackerPath("/org/freedesktop/Tracker1/Resources");
++const QLatin1String TrackerInterface("org.freedesktop.Tracker1.Resources");
++
++const QLatin1String Nco("http://www.semanticdesktop.org/ontologies/2007/03/22/nco#");
++
++// The people the address book shows. nco:default-contact-me is the owner's own card, which
++// the phone keeps among them.
++#define PEOPLE "?c a nco:PersonContact . FILTER(?c != nco:default-contact-me) "
++
++// One query per kind of detail, joined on the contact's IRI here: plain graph patterns, no
++// GROUP_CONCAT or sub-selects. A person's own numbers and addresses are Harmattan's home
++// context, those of their affiliation (nco:Affiliation, the job) the work context. The names
++// were checked against the phone's ontology (32-nco.ontology).
++const char NamesQuery[] =
++    "SELECT ?c nco:nameGiven(?c) nco:nameFamily(?c) nco:nameAdditional(?c) nco:nameHonorificPrefix(?c) "
++    "nco:nameHonorificSuffix(?c) nco:fullname(?c) nco:nickname(?c) WHERE { " PEOPLE "}";
++const char HomePhonesQuery[] =
++    "SELECT ?c nco:phoneNumber(?p) rdf:type(?p) WHERE { " PEOPLE ". ?c nco:hasPhoneNumber ?p }";
++const char WorkPhonesQuery[] =
++    "SELECT ?c nco:phoneNumber(?p) rdf:type(?p) WHERE { " PEOPLE ". ?c nco:hasAffiliation ?a . ?a nco:hasPhoneNumber ?p }";
++const char HomeEmailsQuery[] =
++    "SELECT ?c nco:emailAddress(?e) WHERE { " PEOPLE ". ?c nco:hasEmailAddress ?e }";
++const char WorkEmailsQuery[] =
++    "SELECT ?c nco:emailAddress(?e) WHERE { " PEOPLE ". ?c nco:hasAffiliation ?a . ?a nco:hasEmailAddress ?e }";
++
++#undef PEOPLE
++
++// Tracker answers rows of strings, unbound values as empty ones.
++QVector<QStringList> query(const char *sparql, QContactManager::Error *error)
++{
++    if (*error != QContactManager::NoError)
++        return QVector<QStringList>();
++
++    QDBusMessage call = QDBusMessage::createMethodCall(TrackerService, TrackerPath, TrackerInterface,
++                                                       QStringLiteral("SparqlQuery"));
++    call << QString::fromLatin1(sparql);
++
++    const QDBusReply<QVector<QStringList> > reply = QDBusConnection::sessionBus().call(call);
++
++    if (!reply.isValid()) {
++        // AccessDenied: the app lacks Aegis' TrackerReadAccess credential.
++        qWarning("QContactTrackerEngine: %s: %s", qPrintable(reply.error().name()), qPrintable(reply.error().message()));
++        *error = reply.error().type() == QDBusError::AccessDenied ? QContactManager::PermissionsError
++                                                                  : QContactManager::UnspecifiedError;
++        return QVector<QStringList>();
++    }
++
++    return reply.value();
++}
++
++// The subtypes a number's classes stand for. rdf:type(?p) lists every class of the number,
++// superclasses included, so a mobile number is also Voice and MessagingCapable.
++QList<int> phoneSubTypes(const QString &types)
++{
++    static const struct { const char *suffix; int subType; } classes[] = {
++        { "#CellPhoneNumber", QContactPhoneNumber::SubTypeMobile },
++        { "#VoicePhoneNumber", QContactPhoneNumber::SubTypeVoice },
++        { "#FaxNumber", QContactPhoneNumber::SubTypeFax },
++        { "#PagerNumber", QContactPhoneNumber::SubTypePager },
++        { "#CarPhoneNumber", QContactPhoneNumber::SubTypeCar },
++        { "#ModemNumber", QContactPhoneNumber::SubTypeModem },
++        { "#VideoTelephoneNumber", QContactPhoneNumber::SubTypeVideo },
++        { "#BbsNumber", QContactPhoneNumber::SubTypeBulletinBoardSystem },
++        { "#MessagingNumber", QContactPhoneNumber::SubTypeMessagingCapable },
++    };
++
++    QList<int> subTypes;
++
++    for (const auto &c : classes) {
++        if (types.contains(QLatin1String(c.suffix)))
++            subTypes.append(c.subType);
++    }
++
++    return subTypes;
++}
++
++} // namespace
++
++QContactManagerEngine *QContactTrackerEngineFactory::engine(const QMap<QString, QString> &parameters, QContactManager::Error *error)
++{
++    Q_UNUSED(parameters);
++
++    *error = QContactManager::NoError;
++    return new QContactTrackerEngine;
++}
++
++QString QContactTrackerEngineFactory::managerName() const
++{
++    return QStringLiteral("tracker");
++}
++
++QContactTrackerEngine::QContactTrackerEngine()
++{
++    qDBusRegisterMetaType<QVector<QStringList> >();
++
++    // GraphUpdated(s class, a(iiii) deletes, a(iiii) inserts): only the class is wanted.
++    QDBusConnection::sessionBus().connect(TrackerService, TrackerPath, TrackerInterface, QStringLiteral("GraphUpdated"),
++                                          this, SLOT(graphUpdated(QString)));
++}
++
++QString QContactTrackerEngine::managerName() const
++{
++    return QStringLiteral("tracker");
++}
++
++int QContactTrackerEngine::managerVersion() const
++{
++    return 1;
++}
++
++// ponytail: every request fetches the whole address book (five queries) and filters in
++// memory, O(contacts) per call, contact(id) included. Fine for a phone's few hundred people;
++// translate filters into SPARQL if a big address book makes it slow.
++QList<QContact> QContactTrackerEngine::fetchAll(QContactManager::Error *error) const
++{
++    *error = QContactManager::NoError;
++
++    const QVector<QStringList> names = query(NamesQuery, error);
++    const QVector<QStringList> homePhones = query(HomePhonesQuery, error);
++    const QVector<QStringList> workPhones = query(WorkPhonesQuery, error);
++    const QVector<QStringList> homeEmails = query(HomeEmailsQuery, error);
++    const QVector<QStringList> workEmails = query(WorkEmailsQuery, error);
++
++    if (*error != QContactManager::NoError)
++        return QList<QContact>();
++
++    QList<QContact> people;
++    QHash<QString, int> rowOf;
++
++    for (const QStringList &row : names) {
++        if (row.size() < 8)
++            continue;
++
++        QContact contact;
++        contact.setId(contactId(row.at(0).toUtf8()));
++
++        QContactName name;
++        name.setFirstName(row.at(1));
++        name.setLastName(row.at(2));
++        name.setMiddleName(row.at(3));
++        name.setPrefix(row.at(4));
++        name.setSuffix(row.at(5));
++
++        if (!(row.at(1) + row.at(2) + row.at(3) + row.at(4) + row.at(5)).isEmpty())
++            contact.saveDetail(&name);
++
++        if (!row.at(7).isEmpty()) {
++            QContactNickname nickname;
++            nickname.setNickname(row.at(7));
++            contact.saveDetail(&nickname);
++        }
++
++        // What a list shows for the person: the full name the address book keeps, else the
++        // parts, else the nickname. One without any of these takes its first number below.
++        QString label = row.at(6);
++
++        if (label.isEmpty())
++            label = QStringList({ row.at(1), row.at(3), row.at(2) }).join(QLatin1Char(' ')).simplified();
++
++        if (label.isEmpty())
++            label = row.at(7);
++
++        QContactDisplayLabel displayLabel;
++        displayLabel.setLabel(label);
++        contact.saveDetail(&displayLabel);
++
++        rowOf.insert(row.at(0), people.size());
++        people.append(contact);
++    }
++
++    const auto addPhones = [&](const QVector<QStringList> &rows, int context) {
++        for (const QStringList &row : rows) {
++            const int index = rowOf.value(row.value(0), -1);
++
++            if (index < 0 || row.value(1).isEmpty())
++                continue;
++
++            QContactPhoneNumber number;
++            number.setNumber(row.at(1));
++            number.setContexts(context);
++            number.setSubTypes(phoneSubTypes(row.value(2)));
++            people[index].saveDetail(&number);
++        }
++    };
++
++    const auto addEmails = [&](const QVector<QStringList> &rows, int context) {
++        for (const QStringList &row : rows) {
++            const int index = rowOf.value(row.value(0), -1);
++
++            if (index < 0 || row.value(1).isEmpty())
++                continue;
++
++            QContactEmailAddress address;
++            address.setEmailAddress(row.at(1));
++            address.setContexts(context);
++            people[index].saveDetail(&address);
++        }
++    };
++
++    addPhones(homePhones, QContactDetail::ContextHome);
++    addPhones(workPhones, QContactDetail::ContextWork);
++    addEmails(homeEmails, QContactDetail::ContextHome);
++    addEmails(workEmails, QContactDetail::ContextWork);
++
++    for (QContact &contact : people) {
++        QContactDisplayLabel displayLabel = contact.detail<QContactDisplayLabel>();
++
++        if (displayLabel.label().isEmpty()) {
++            displayLabel.setLabel(contact.detail<QContactPhoneNumber>().number());
++            contact.saveDetail(&displayLabel);
++        }
++    }
++
++    return people;
++}
++
++QList<QContactId> QContactTrackerEngine::contactIds(const QContactFilter &filter, const QList<QContactSortOrder> &sortOrders,
++                                                    QContactManager::Error *error) const
++{
++    QList<QContactId> ids;
++
++    for (const QContact &contact : contacts(filter, sortOrders, QContactFetchHint(), error))
++        ids.append(contact.id());
++
++    return ids;
++}
++
++QList<QContact> QContactTrackerEngine::contacts(const QContactFilter &filter, const QList<QContactSortOrder> &sortOrders,
++                                                const QContactFetchHint &fetchHint, QContactManager::Error *error) const
++{
++    Q_UNUSED(fetchHint); // every contact carries the few details this engine has
++
++    QList<QContact> matches;
++
++    for (const QContact &contact : fetchAll(error)) {
++        if (testFilter(filter, contact))
++            addSorted(&matches, contact, sortOrders);
++    }
++
++    return matches;
++}
++
++QContact QContactTrackerEngine::contact(const QContactId &contactId, const QContactFetchHint &fetchHint,
++                                        QContactManager::Error *error) const
++{
++    QContactIdFilter filter;
++    filter.setIds(QList<QContactId>() << contactId);
++
++    const QList<QContact> found = contacts(filter, QList<QContactSortOrder>(), fetchHint, error);
++
++    if (found.isEmpty()) {
++        if (*error == QContactManager::NoError)
++            *error = QContactManager::DoesNotExistError;
++
++        return QContact();
++    }
++
++    return found.first();
++}
++
++bool QContactTrackerEngine::isFilterSupported(const QContactFilter &filter) const
++{
++    Q_UNUSED(filter); // all of them, tested in memory
++    return true;
++}
++
++QList<QContactType::TypeValues> QContactTrackerEngine::supportedContactTypes() const
++{
++    return QList<QContactType::TypeValues>() << QContactType::TypeContact;
++}
++
++QList<QContactDetail::DetailType> QContactTrackerEngine::supportedContactDetailTypes() const
++{
++    return QList<QContactDetail::DetailType>() << QContactDetail::TypeDisplayLabel << QContactDetail::TypeEmailAddress
++                                               << QContactDetail::TypeName << QContactDetail::TypeNickname
++                                               << QContactDetail::TypePhoneNumber << QContactDetail::TypeType;
++}
++
++// Fetches only, completed before this returns. Everything else - saving, removing,
++// relationships, collections - is refused: start() returns false.
++//
++// ponytail: read-only, and the queries block the caller's thread for their round trips.
++// Writing would mean Tracker updates in the shape the stock address book reads back.
++bool QContactTrackerEngine::startRequest(QContactAbstractRequest *request)
++{
++    QContactManager::Error error = QContactManager::NoError;
++
++    switch (request->type()) {
++    case QContactAbstractRequest::ContactFetchRequest: {
++        auto *fetch = static_cast<QContactFetchRequest *>(request);
++        updateRequestState(request, QContactAbstractRequest::ActiveState);
++        const QList<QContact> result = contacts(fetch->filter(), fetch->sorting(), fetch->fetchHint(), &error);
++        updateContactFetchRequest(fetch, result, error, QContactAbstractRequest::FinishedState);
++        return true;
++    }
++    case QContactAbstractRequest::ContactIdFetchRequest: {
++        auto *fetch = static_cast<QContactIdFetchRequest *>(request);
++        updateRequestState(request, QContactAbstractRequest::ActiveState);
++        const QList<QContactId> result = contactIds(fetch->filter(), fetch->sorting(), &error);
++        updateContactIdFetchRequest(fetch, result, error, QContactAbstractRequest::FinishedState);
++        return true;
++    }
++    case QContactAbstractRequest::ContactFetchByIdRequest: {
++        auto *fetch = static_cast<QContactFetchByIdRequest *>(request);
++        updateRequestState(request, QContactAbstractRequest::ActiveState);
++        QMap<int, QContactManager::Error> errors;
++        const QList<QContact> result = contacts(fetch->contactIds(), fetch->fetchHint(), &errors, &error);
++        updateContactFetchByIdRequest(fetch, result, error, errors, QContactAbstractRequest::FinishedState);
++        return true;
++    }
++    default:
++        return false;
++    }
++}
++
++bool QContactTrackerEngine::cancelRequest(QContactAbstractRequest *request)
++{
++    Q_UNUSED(request); // nothing is ever left running
++    return false;
++}
++
++bool QContactTrackerEngine::waitForRequestFinished(QContactAbstractRequest *request, int msecs)
++{
++    Q_UNUSED(request);
++    Q_UNUSED(msecs);
++    return true;
++}
++
++void QContactTrackerEngine::requestDestroyed(QContactAbstractRequest *request)
++{
++    Q_UNUSED(request);
++}
++
++void QContactTrackerEngine::graphUpdated(const QString &className)
++{
++    // Contacts, their affiliations, numbers and addresses all live in nco.
++    if (className.startsWith(Nco))
++        emit dataChanged();
++}
++
++QT_END_NAMESPACE_CONTACTS
+--- /dev/null
++++ b/src/plugins/contacts/tracker/qcontacttrackerengine_p.h
+@@ -0,0 +1,83 @@
++/****************************************************************************
++**
++** Copyright (C) 2026 Andrea Faggin
++**
++** The Harmattan (N9) address book for QtContacts: a read-only engine over Tracker 0.10,
++** where the phone keeps its contacts (the nco ontology).
++**
++** This file may be used under the terms of the GNU Lesser General Public License version 3,
++** or the GNU General Public License version 2 or 3, as the Qt Contacts module it belongs to.
++**
++****************************************************************************/
++
++#ifndef QCONTACTTRACKERENGINE_P_H
++#define QCONTACTTRACKERENGINE_P_H
++
++//
++//  W A R N I N G
++//  -------------
++//
++// This file is not part of the Qt API.  It exists purely as an
++// implementation detail.  This header file may change from version to
++// version without notice, or even be removed.
++//
++// We mean it.
++//
++
++#include <QtContacts/qcontactmanagerengine.h>
++#include <QtContacts/qcontactmanagerenginefactory.h>
++
++QT_BEGIN_NAMESPACE_CONTACTS
++
++class QContactTrackerEngineFactory : public QContactManagerEngineFactory
++{
++    Q_OBJECT
++    Q_PLUGIN_METADATA(IID "org.qt-project.Qt.QContactManagerEngineFactoryInterface" FILE "tracker.json")
++public:
++    QContactManagerEngine *engine(const QMap<QString, QString> &parameters, QContactManager::Error *error) override;
++    QString managerName() const override;
++};
++
++// Every contact the phone's address book shows (nco:PersonContact, without the "me" card):
++// names, nickname, phone numbers and e-mail addresses, the person's own and those of their
++// affiliations (Harmattan's work context).
++//
++// Each fetch runs five queries over Tracker's D-Bus interface and filters and sorts in
++// memory with the base engine's helpers, so any filter and sort order works. Requests
++// complete inside startRequest, as the memory engine's do.
++class QContactTrackerEngine : public QContactManagerEngine
++{
++    Q_OBJECT
++public:
++    QContactTrackerEngine();
++
++    QString managerName() const override;
++    int managerVersion() const override;
++
++    using QContactManagerEngine::contacts;
++    QList<QContactId> contactIds(const QContactFilter &filter, const QList<QContactSortOrder> &sortOrders,
++                                 QContactManager::Error *error) const override;
++    QList<QContact> contacts(const QContactFilter &filter, const QList<QContactSortOrder> &sortOrders,
++                             const QContactFetchHint &fetchHint, QContactManager::Error *error) const override;
++    QContact contact(const QContactId &contactId, const QContactFetchHint &fetchHint, QContactManager::Error *error) const override;
++
++    bool isFilterSupported(const QContactFilter &filter) const override;
++    QList<QContactType::TypeValues> supportedContactTypes() const override;
++    QList<QContactDetail::DetailType> supportedContactDetailTypes() const override;
++
++    bool startRequest(QContactAbstractRequest *request) override;
++    bool cancelRequest(QContactAbstractRequest *request) override;
++    bool waitForRequestFinished(QContactAbstractRequest *request, int msecs) override;
++    void requestDestroyed(QContactAbstractRequest *request) override;
++
++private Q_SLOTS:
++    // Tracker's GraphUpdated, which carries the changed class first.
++    void graphUpdated(const QString &className);
++
++private:
++    QList<QContact> fetchAll(QContactManager::Error *error) const;
++};
++
++QT_END_NAMESPACE_CONTACTS
++
++#endif // QCONTACTTRACKERENGINE_P_H
+--- /dev/null
++++ b/src/plugins/contacts/tracker/tracker.json
+@@ -0,0 +1,3 @@
++{
++    "Keys": [ "tracker" ]
++}
+--- /dev/null
++++ b/src/plugins/contacts/tracker/tracker.pro
+@@ -0,0 +1,14 @@
++TARGET = qtcontacts_tracker
++QT = core dbus contacts
++
++PLUGIN_TYPE = contacts
++PLUGIN_CLASS_NAME = QContactTrackerEngineFactory
++load(qt_plugin)
++
++HEADERS += \
++    qcontacttrackerengine_p.h
++
++SOURCES += \
++    qcontacttrackerengine.cpp
++
++OTHER_FILES += tracker.json

@@ -4,8 +4,8 @@
 # to $WORK/host.
 # Usage: build-qt.sh [step...]  steps: configure qtbase qtdeclarative qtsvg qtinsider-maliit
 #        qt-components sensorfw qtsensors qtmultimedia qtgraphicaleffects qtimageformats
-#        qtwebsockets qtquickcontrols2 qtfeedback qtlocation qtconnectivity (default: all of
-#        them, in that order);
+#        qtwebsockets qtquickcontrols2 qtfeedback qtlocation qtconnectivity qtdocgallery qtpim
+#        (default: all of them, in that order);
 #        relocate (also run by each)
 # Re-runnable: finished steps leave a stamp in $B; delete the stamp to redo a step.
 set -euo pipefail
@@ -61,6 +61,11 @@ module() { # qtbase uses the configured tree above; the others go through our qm
         # Phase 4: the phone's GStreamer 0.10 (playbin2, the DSP decoders, pulsesink).
         rm -rf "${B:?}/$n" && mkdir -p "$B/$n" && cd "$B/$n"
         "$WORK/host/bin/qmake" "$SRC/$n" -- -gstreamer 0.10
+    elif [ "$n" = qtdocgallery ]; then
+        # The Tracker backend (the phone's Tracker 0.10); without it the module builds the null
+        # gallery, which finds nothing.
+        rm -rf "${B:?}/$n" && mkdir -p "$B/$n" && cd "$B/$n"
+        "$WORK/host/bin/qmake" "$SRC/$n" tracker_enabled=yes
     elif [ "$n" = qtfeedback ]; then
         # Haptics: the library, the QML import and the meegotouch backend (meegofeedbackd),
         # not the examples; FileEffect's multimedia backend needs a module build (none here).
@@ -163,7 +168,8 @@ precompile_qml() {
 }
 
 for step in ${*:-configure qtbase qtdeclarative qtsvg qtinsider-maliit qt-components sensorfw qtsensors qtmultimedia \
-                qtgraphicaleffects qtimageformats qtwebsockets qtquickcontrols2 qtfeedback qtlocation qtconnectivity}; do
+                qtgraphicaleffects qtimageformats qtwebsockets qtquickcontrols2 qtfeedback qtlocation qtconnectivity \
+                qtdocgallery qtpim}; do
     case $step in
         configure) configure ;;
         relocate) relocate ;;
