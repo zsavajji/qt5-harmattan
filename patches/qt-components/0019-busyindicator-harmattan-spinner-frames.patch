@@ -1,0 +1,35 @@
+BusyIndicator: draw the Harmattan theme's spinner frames (spinner_<size>_<n> and
+spinnerinverted_<size>_<n>, ten per size), as the Qt 4 component does, instead of rotating
+Nemo's nemomobile-busyindicator image, which the Harmattan theme does not have: every
+BusyIndicator rendered nothing ("Unknown theme image: nemomobile-busyindicator(-inverted)").
+BusyIndicatorStyle still carries spinnerFrames, numberOfFrames and period for this.
+
+--- a/src/meego/BusyIndicator.qml
++++ b/src/meego/BusyIndicator.qml
+@@ -66,20 +66,19 @@
+         property bool offScreen: false
+     }
+ 
++    // Harmattan: the theme's spinner frames (spinner_<size>_<n>, spinnerinverted_...), as the
++    // Qt 4 component draws them. Nemo's single rotated nemomobile-busyindicator image is not
++    // in the Harmattan theme, so every BusyIndicator was invisible.
+     Image {
+         id: spinner
+         property int index: 1
+-        source: "image://theme/nemomobile-busyindicator" + (theme.inverted ? "-inverted" : "")
++        source: root.platformStyle.spinnerFrames + "_" + root.implicitWidth + "_" + index
+         smooth: true
+-        height: root.height
+-        width: root.width
+ 
+-        NumberAnimation on rotation {
+-            from: 0; to: 360
++        NumberAnimation on index {
++            from: 1; to: root.platformStyle.numberOfFrames
+             duration: root.platformStyle.period
+             running: root.running && root.visible && Qt.application.active && !internal.offScreen
+-            target: spinner
+-            property: "rotation"
+             loops: Animation.Infinite
+         }
+     }
